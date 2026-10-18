@@ -1,0 +1,7 @@
+# 运行本工具所需依赖
+DrissionPage>=4.1.0
+fastapi>=0.110.0
+uvicorn>=0.27.0
+
+# 可选：跑 tests/test_server_e2e.py 的 WebSocket 用例时需要
+# websocket-client>=1.7.0

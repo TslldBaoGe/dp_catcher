@@ -1,0 +1,184 @@
+<!DOCTYPE html>
+<html lang="zh-CN">
+<head>
+<meta charset="utf-8">
+<title>DrissionPage 元素捕获器 - 测试页</title>
+<style>
+  * { box-sizing: border-box; }
+  body { font-family: "Segoe UI", "Microsoft YaHei", sans-serif; margin: 0; background: #f5f7fa; color: #1f2937; }
+  header { background: #1e293b; color: #fff; padding: 14px 22px; }
+  header h1 { margin: 0; font-size: 18px; }
+  .wrap { padding: 18px 22px 60px; max-width: 1100px; }
+  section { background: #fff; border: 1px solid #e2e8f0; border-radius: 8px; padding: 14px 18px; margin-bottom: 16px; }
+  section h2 { font-size: 15px; margin: 0 0 12px; color: #0f172a; border-left: 4px solid #2563eb; padding-left: 8px; }
+  label { display: inline-block; min-width: 78px; font-size: 13px; color: #475569; }
+  input[type=text], input[type=password], input[type=email], textarea, select {
+    padding: 6px 9px; border: 1px solid #cbd5e1; border-radius: 5px; font-size: 13px; font-family: inherit;
+  }
+  input:focus, textarea:focus { outline: 2px solid #93c5fd; border-color: #2563eb; }
+  button { padding: 7px 15px; border: 0; border-radius: 5px; background: #2563eb; color: #fff; font-size: 13px; cursor: pointer; }
+  button:hover { background: #1d4ed8; }
+  button.ghost { background: #e2e8f0; color: #334155; }
+  button.ghost:hover { background: #cbd5e1; }
+  .row { margin-bottom: 10px; }
+  nav a { margin-right: 14px; color: #2563eb; font-size: 13px; }
+  table { border-collapse: collapse; width: 100%; font-size: 13px; }
+  th, td { border: 1px solid #e2e8f0; padding: 7px 10px; text-align: left; }
+  th { background: #f1f5f9; }
+  tr:nth-child(even) td { background: #fafcff; }
+  ul#todo { list-style: none; padding: 0; margin: 0; font-size: 13px; }
+  ul#todo li { padding: 6px 10px; border-bottom: 1px dashed #e2e8f0; }
+  ul#todo li .price { color: #b91c1c; float: right; }
+  #status { font-size: 13px; color: #16a34a; font-weight: 600; min-height: 18px; }
+  .box { display: inline-block; padding: 8px 12px; background: #f1f5f9; border-radius: 6px; font-size: 13px; margin-right: 8px; }
+  iframe { width: 100%; height: 120px; border: 1px solid #cbd5e1; border-radius: 6px; }
+  .tag { display:inline-block; background:#dbeafe; color:#1e40af; border-radius: 10px; padding: 2px 9px; font-size: 12px; margin-right: 6px;}
+  #hoverTarget { width: 220px; height: 70px; line-height: 70px; text-align: center; background: #fef3c7;
+                 border: 2px dashed #f59e0b; border-radius: 8px; transition: all .15s; }
+  #hoverTarget.on { background: #bbf7d0; border-color: #16a34a; transform: scale(1.03); }
+</style>
+</head>
+<body>
+<header><h1>DrissionPage 元素捕获器 · 本地测试页</h1></header>
+<div class="wrap">
+
+  <section id="nav-sec">
+    <h2>1. 导航链接 (a)</h2>
+    <nav id="mainNav" class="nav-bar">
+      <a href="#home" id="navHome" class="nav-link active" data-page="home">首页</a>
+      <a href="#docs" id="navDocs" class="nav-link" data-page="docs">文档中心</a>
+      <a href="#download" class="nav-link download" data-page="download">下载</a>
+      <a href="https://example.com" class="nav-link external" target="_blank" rel="noopener">外部链接</a>
+    </nav>
+  </section>
+
+  <section id="form-sec">
+    <h2>2. 表单输入 (input / textarea / select)</h2>
+    <div class="row"><label for="username">用户名</label>
+      <input type="text" id="username" name="username" class="form-input" placeholder="请输入用户名" autocomplete="off">
+    </div>
+    <div class="row"><label for="password">密码</label>
+      <input type="password" id="password" name="password" class="form-input" placeholder="请输入密码">
+    </div>
+    <div class="row"><label for="email">邮箱</label>
+      <input type="email" id="email" name="email" class="form-input" value="test@example.com" readonly>
+    </div>
+    <div class="row"><label for="remark">备注</label>
+      <textarea id="remark" name="remark" rows="2" placeholder="多行文本"></textarea>
+    </div>
+    <div class="row"><label for="city">城市</label>
+      <select id="city" name="city">
+        <option value="">请选择</option>
+        <option value="bj">北京</option>
+        <option value="sh" selected>上海</option>
+        <option value="gz">广州</option>
+      </select>
+    </div>
+    <div class="row">
+      <label>性别</label>
+      <input type="radio" name="gender" id="genderM" value="male" checked> <span>男</span>
+      <input type="radio" name="gender" id="genderF" value="female"> <span>女</span>
+    </div>
+    <div class="row">
+      <label>爱好</label>
+      <input type="checkbox" id="hobbyRead" name="hobby" value="read" checked> <span>阅读</span>
+      <input type="checkbox" id="hobbyCode" name="hobby" value="code"> <span>编程</span>
+    </div>
+    <div class="row">
+      <button id="submitBtn" type="button" class="btn btn-primary">提交表单</button>
+      <button id="resetBtn" type="button" class="btn btn-ghost">重置</button>
+    </div>
+    <div id="status" role="status" aria-live="polite"></div>
+  </section>
+
+  <section id="table-sec">
+    <h2>3. 数据表格 (table/tr/td)</h2>
+    <table id="userTable">
+      <thead><tr><th>ID</th><th>姓名</th><th>部门</th><th>状态</th><th>操作</th></tr></thead>
+      <tbody>
+        <tr data-uid="1001"><td>1001</td><td class="name">张三</td><td>研发部</td><td><span class="tag">在职</span></td>
+          <td><button class="row-btn edit">编辑</button></td></tr>
+        <tr data-uid="1002"><td>1002</td><td class="name">李四</td><td>市场部</td><td><span class="tag">在职</span></td>
+          <td><button class="row-btn edit">编辑</button></td></tr>
+        <tr data-uid="1003"><td>1003</td><td class="name">王五</td><td>财务部</td><td><span class="tag">离职</span></td>
+          <td><button class="row-btn edit">编辑</button></td></tr>
+      </tbody>
+    </table>
+  </section>
+
+  <section id="list-sec">
+    <h2>4. 动态列表 (重复元素 · 相对定位)</h2>
+    <ul id="todo">
+      <li class="item" data-id="1"><span class="title">苹果</span><span class="price">￥12.5</span></li>
+      <li class="item" data-id="2"><span class="title">香蕉</span><span class="price">￥8.0</span></li>
+      <li class="item" data-id="3"><span class="title">橙子</span><span class="price">￥15.8</span></li>
+      <li class="item" data-id="4"><span class="title">葡萄</span><span class="price">￥32.0</span></li>
+    </ul>
+    <div class="row" style="margin-top:10px">
+      <button id="addItemBtn" class="ghost">追加一行</button>
+      <span class="tag">当前 <b id="itemCount">4</b> 项</span>
+    </div>
+  </section>
+
+  <section id="hover-sec">
+    <h2>5. 悬停 / 属性 / 样式</h2>
+    <div id="hoverTarget" class="hover-box">把鼠标移到我身上</div>
+    <p style="font-size:13px">
+      <span id="attrBox" class="box" data-role="demo" data-code="A-001" title="这是提示文字">带 data-* 属性的元素</span>
+      <span id="textBox" class="box">纯文本：<b>Hello DrissionPage</b></span>
+    </p>
+  </section>
+
+  <section id="iframe-sec">
+    <h2>6. 内嵌 iframe</h2>
+    <iframe id="innerFrame" name="innerFrame" srcdoc="<!DOCTYPE html><html><body style='font-family:sans-serif;padding:10px'>
+      <h3 style='margin:0 0 8px'>iframe 内部文档</h3>
+      <input type='text' id='frameInput' name='frameInput' placeholder='框架内输入框'>
+      <button id='frameBtn' style='margin-left:8px'>框架内按钮</button>
+      </body></html>"></iframe>
+  </section>
+
+  <section id="shadow-sec">
+    <h2>7. Shadow DOM</h2>
+    <div id="shadowHost"></div>
+  </section>
+
+</div>
+<script>
+  document.getElementById('submitBtn').addEventListener('click', function () {
+    var u = document.getElementById('username').value;
+    var s = document.getElementById('status');
+    s.textContent = '[test] 已提交，用户名=' + (u || '(空)');
+    this.dataset.clicked = 'true';
+  });
+  document.getElementById('resetBtn').addEventListener('click', function () {
+    document.getElementById('username').value = '';
+    document.getElementById('status').textContent = '[test] 已重置';
+  });
+  document.getElementById('addItemBtn').addEventListener('click', function () {
+    var ul = document.getElementById('todo');
+    var n = ul.children.length + 1;
+    var li = document.createElement('li');
+    li.className = 'item';
+    li.dataset.id = n;
+    li.innerHTML = '<span class="title">新增水果' + n + '</span><span class="price">￥' + (n * 3) + '.0</span>';
+    ul.appendChild(li);
+    document.getElementById('itemCount').textContent = ul.children.length;
+  });
+  var ht = document.getElementById('hoverTarget');
+  ht.addEventListener('mouseenter', function () { ht.classList.add('on'); ht.textContent = '悬停触发成功'; });
+  ht.addEventListener('mouseleave', function () { ht.classList.remove('on'); ht.textContent = '把鼠标移到我身上'; });
+  document.querySelectorAll('.row-btn.edit').forEach(function (b) {
+    b.addEventListener('click', function () {
+      document.getElementById('status').textContent = '[test] 编辑行 uid=' + this.closest('tr').dataset.uid;
+    });
+  });
+  var host = document.getElementById('shadowHost');
+  var root = host.attachShadow({ mode: 'open' });
+  root.innerHTML = '<style>button{padding:7px 14px;border:0;border-radius:5px;background:#7c3aed;color:#fff}</style>'
+    + '<div style="padding:10px;background:#faf5ff;border:1px dashed #a855f7;border-radius:6px">'
+    + 'Shadow 内部：<button id="shadowBtn" class="shadow-btn">Shadow按钮</button>'
+    + '<span id="shadowText" style="margin-left:8px">shadow 文本内容</span></div>';
+</script>
+</body>
+</html>

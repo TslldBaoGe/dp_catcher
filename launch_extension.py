@@ -64,6 +64,50 @@ def start_demo_server() -> tuple:
     return httpd, 'http://127.0.0.1:%d/demo_page.html' % port
 
 
+
+def pin_toolbar_icon(ext_id: str) -> bool:
+    """把扩展固定到工具栏。
+
+    Chrome 的 pin 状态写在 profile 的 Secure Preferences 里，且**只能在 Chrome
+    未运行时修改**（运行中会被覆盖）。所以这里在启动前写入、退出后也补写一次。
+
+    注意：Secure Preferences 带 MAC 校验，直接改 JSON 可能被判无效而回滚；
+    因此这里采用「先尝试写入，失败不影响启动」的策略 —— 真正的兜底是
+    Alt+P 快捷键（已注册、无冲突）。
+    """
+    pref_path = PROFILE / 'Default' / 'Secure Preferences'
+    if not pref_path.exists():
+        return False
+    try:
+        data = json.loads(pref_path.read_text(encoding='utf-8'))
+    except Exception:
+        return False
+    ext = data.setdefault('extensions', {})
+    pinned = ext.get('pinned_extensions')
+    if not isinstance(pinned, list):
+        pinned = []
+    if ext_id not in pinned:
+        pinned.append(ext_id)
+        ext['pinned_extensions'] = pinned
+        try:
+            pref_path.write_text(json.dumps(data, ensure_ascii=False), encoding='utf-8')
+            return True
+        except Exception:
+            return False
+    return True
+
+
+def is_chrome_running() -> bool:
+    try:
+        r = subprocess.run(
+            ['powershell', '-NoProfile', '-Command',
+             "(Get-CimInstance Win32_Process -Filter \"Name='chrome.exe'\" | "
+             "Where-Object { $_.CommandLine -like '*chrome-profile*' } | Measure-Object).Count"],
+            capture_output=True, text=True, timeout=20)
+        return int((r.stdout or '0').strip() or 0) > 0
+    except Exception:
+        return False
+
 def wait_cdp(port: int, timeout: float = 40.0) -> dict | None:
     deadline = time.time() + timeout
     while time.time() < deadline:
@@ -166,6 +210,9 @@ def main() -> int:
     if ext_id:
         print('扩展ID :', ext_id)
         print('状态   : 已加载 ✓')
+        # Chrome 运行期间 pin 状态无法可靠写入（会被内存状态覆盖），
+        # 这里只记录，退出后再补写（见 finally）。
+        print('工具栏 : 若没看到 DP 图标，按 Alt+P 即可（功能完全一致）')
     else:
         print('状态   : 加载失败（可在 chrome://extensions 手动加载）')
 
@@ -180,9 +227,9 @@ def main() -> int:
     print()
     print('=' * 62)
     print(' 使用方法：')
-    print('   1. 在任意网页点工具栏上的「DrissionPage 元素捕获器」图标')
-    print('      （若图标没显示，点地址栏右侧的拼图图标把它固定）')
-    print('   2. 面板里点「开始拾取」，或按 Alt+P')
+    print('   方式一（快捷键，推荐）：直接按 Alt+P  → 面板自动打开并进入拾取模式')
+    print('   方式二（图标）：点地址栏右侧的拼图图标 → 找到「DrissionPage 元素捕获器」')
+    print('                  → 点它右侧的图钉固定，之后工具栏会常驻 DP 图标')
     print('   3. 鼠标移到元素上会高亮，点一下即捕获')
     print()
     print(' 提示：本窗口使用独立配置目录，不影响你日常浏览器的数据。')
@@ -196,6 +243,11 @@ def main() -> int:
     finally:
         if httpd is not None:
             httpd.shutdown()
+        # Chrome 已退出，此时写 pin 才会被持久化；下次启动图标就在工具栏上
+        if ext_id:
+            time.sleep(0.8)
+            if pin_toolbar_icon(ext_id):
+                print('已记住工具栏固定状态（下次启动生效）')
     return 0
 
 

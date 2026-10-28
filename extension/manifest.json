@@ -3,8 +3,21 @@
   "name": "DrissionPage 元素捕获器",
   "version": "1.0.0",
   "description": "在你自己的浏览器里点选元素，生成经校验的 DrissionPage 定位表达式与 Python 代码。",
-  "permissions": ["activeTab", "scripting", "storage", "clipboardWrite", "tabs"],
-  "host_permissions": ["<all_urls>"],
+  "icons": {
+    "16": "icons/icon16.png",
+    "48": "icons/icon48.png",
+    "128": "icons/icon128.png"
+  },
+  "permissions": [
+    "activeTab",
+    "scripting",
+    "storage",
+    "clipboardWrite",
+    "tabs"
+  ],
+  "host_permissions": [
+    "<all_urls>"
+  ],
   "action": {
     "default_title": "DrissionPage 元素捕获器",
     "default_icon": {
@@ -18,8 +31,12 @@
   },
   "content_scripts": [
     {
-      "matches": ["<all_urls>"],
-      "js": ["picker.js"],
+      "matches": [
+        "<all_urls>"
+      ],
+      "js": [
+        "picker.js"
+      ],
       "run_at": "document_idle",
       "all_frames": true,
       "match_about_blank": true
@@ -27,13 +44,22 @@
   ],
   "web_accessible_resources": [
     {
-      "resources": ["panel.html", "panel.js", "panel.css", "icon.svg"],
-      "matches": ["<all_urls>"]
+      "resources": [
+        "panel.html",
+        "panel.js",
+        "panel.css",
+        "icon.svg"
+      ],
+      "matches": [
+        "<all_urls>"
+      ]
     }
   ],
   "commands": {
     "toggle-pick": {
-      "suggested_key": { "default": "Alt+P" },
+      "suggested_key": {
+        "default": "Alt+P"
+      },
       "description": "开关拾取模式"
     }
   }

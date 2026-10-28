@@ -1383,8 +1383,11 @@
       window.__DPC_PANEL__.toggle();
       sendResponse({ ok: true, visible: STATE.visible });
     } else if (msg.cmd === 'toggle-pick') {
+      // 快捷键可能是在面板关着的时候按的：先确保面板弹出来，
+      // 否则用户只看到页面进入拾取态却没有任何 UI 反馈。
+      if (!STATE.visible) api('show');
       setPick(!STATE.pickMode);
-      sendResponse({ ok: true, on: STATE.pickMode });
+      sendResponse({ ok: true, on: STATE.pickMode, visible: STATE.visible });
     } else if (msg.cmd === 'ping') {
       sendResponse({ ok: true });
     }

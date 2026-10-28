@@ -280,6 +280,52 @@ def main() -> int:
         except Exception as exc:
             check('面板脚本已就绪', False, '%s: %s' % (type(exc).__name__, str(exc)[:80]))
 
+        # 2a) Alt+P 等价路径：面板关闭时收到 toggle-pick，应自动弹出并进入拾取
+        try:
+            tabs_now = http_json('http://127.0.0.1:%d/json/list' % PORT)
+            sw = next((t for t in tabs_now if t.get('type') == 'service_worker'
+                       and ext_id and ext_id in (t.get('url') or '')), None)
+            hotkey_result = None
+            if sw:
+                w = websocket.create_connection(sw['webSocketDebuggerUrl'], timeout=30)
+                hotkey_expr = """(async () => {
+                    const tabs = await chrome.tabs.query({active:true,currentWindow:true});
+                    const id = tabs[0].id;
+                    // 先把面板藏起来，模拟「面板关着时按 Alt+P」
+                    await chrome.scripting.executeScript({
+                        target:{tabId:id},
+                        func: () => { if (window.__DPC_PANEL__) window.__DPC_PANEL__.hide(); },
+                    });
+                    // 走和快捷键完全相同的消息路径
+                    const res = await chrome.tabs.sendMessage(id, {cmd:'toggle-pick'});
+                    const probe = await chrome.scripting.executeScript({
+                        target:{tabId:id},
+                        func: () => ({
+                            visible: window.__DPC_PANEL__ ? window.__DPC_PANEL__.state.visible : null,
+                            pickMode: window.__DPC_PANEL__ ? window.__DPC_PANEL__.state.pickMode : null,
+                        }),
+                    });
+                    return JSON.stringify({msg: res, state: probe[0].result});
+                })()"""
+                w.send(json.dumps({'id': 1, 'method': 'Runtime.evaluate', 'params': {
+                    'expression': hotkey_expr, 'returnByValue': True, 'awaitPromise': True}}))
+                deadline = time.time() + 25
+                while time.time() < deadline:
+                    m = json.loads(w.recv())
+                    if m.get('id') == 1:
+                        hotkey_result = m.get('result', {}).get('result', {}).get('value')
+                        break
+                w.close()
+            if hotkey_result:
+                info = json.loads(hotkey_result)
+                st = info.get('state') or {}
+                check('Alt+P 会自动弹出面板', st.get('visible') is True, st)
+                check('Alt+P 会进入拾取模式', st.get('pickMode') is True, st.get('pickMode'))
+            else:
+                check('Alt+P 会自动弹出面板', False, '未取到结果')
+        except Exception as exc:
+            check('Alt+P 会自动弹出面板', False, '%s: %s' % (type(exc).__name__, str(exc)[:80]))
+
         # 2b) 面板拖动：模拟按住标题栏移动，确认位置真的改变
         try:
             tabs_now = http_json('http://127.0.0.1:%d/json/list' % PORT)

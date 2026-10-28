@@ -86,11 +86,20 @@ chrome.commands.onCommand.addListener(async (command) => {
   if (command !== 'toggle-pick') return;
   const [tab] = await chrome.tabs.query({ active: true, currentWindow: true });
   if (!tab || !tab.id) return;
-  if (!(await injectInto(tab.id))) return;
-  if (!(await ensurePanel(tab.id))) return;
+  if (!(await injectInto(tab.id))) {
+    await setBadge('!', '#ef4444');
+    return;
+  }
+  if (!(await ensurePanel(tab.id))) {
+    await setBadge('!', '#ef4444');
+    return;
+  }
   try {
+    // 面板侧的 toggle-pick 会：面板未显示则先显示，再切换拾取模式。
+    // 这样「第一次按 Alt+P」也能立刻看到界面。
     const res = await chrome.tabs.sendMessage(tab.id, { cmd: 'toggle-pick' });
     await chrome.storage.local.set({ pickMode: !!(res && res.on) });
+    await setBadge('', null);
   } catch (e) {
     console.warn('[DPC] 切换拾取失败', e);
   }

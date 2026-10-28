@@ -607,7 +607,113 @@
 
   /* ------------------------------------------------------------- UI 绑定 */
 
+  /* ------------------------------------------------------- 面板拖动 */
+
+  const DRAG_KEY = 'panelPos';
+
+  function clampPos(panel, left, top) {
+    // 保证标题栏始终留在视口内，避免拖丢
+    const w = panel.offsetWidth || 430;
+    const h = panel.offsetHeight || 200;
+    const minLeft = -w + 120;             // 至少露出 120px
+    const maxLeft = (window.innerWidth || 1200) - 120;
+    const maxTop = (window.innerHeight || 800) - 44;
+    return {
+      left: Math.max(minLeft, Math.min(maxLeft, left)),
+      top: Math.max(0, Math.min(maxTop, top)),
+    };
+  }
+
+  function applyPos(panel, pos) {
+    const p2 = clampPos(panel, pos.left, pos.top);
+    // 一旦用 left/top 定位，必须清掉 right，否则两者会互相影响
+    panel.style.right = 'auto';
+    panel.style.left = p2.left + 'px';
+    panel.style.top = p2.top + 'px';
+    return p2;
+  }
+
+  function restorePos(panel) {
+    // 关键：调用前必须已去掉 hidden。元素 display:none 时
+    // offsetWidth / getBoundingClientRect 全是 0，算出来的位置会错。
+    if (panel.classList.contains('hidden')) return;
+
+    const saved = STATE.store[DRAG_KEY];
+    if (saved && typeof saved.left === 'number' && typeof saved.top === 'number') {
+      applyPos(panel, saved);
+      return;
+    }
+    const w = panel.offsetWidth || 430;
+    applyPos(panel, { left: (window.innerWidth || 1200) - w - 12, top: 12 });
+  }
+
+  function makeDraggable(panel) {
+    const head = panel.querySelector('.head');
+    if (!head) return;
+
+    let dragging = false;
+    let startX = 0;
+    let startY = 0;
+    let baseLeft = 0;
+    let baseTop = 0;
+    let moved = false;
+
+    const onDown = (e) => {
+      // 别在按钮上触发拖动
+      if (e.target.closest && e.target.closest('button')) return;
+      if (e.button !== undefined && e.button !== 0) return;
+      const rect = panel.getBoundingClientRect();
+      dragging = true;
+      moved = false;
+      startX = e.clientX;
+      startY = e.clientY;
+      baseLeft = rect.left;
+      baseTop = rect.top;
+      panel.classList.add('dragging');
+      head.classList.add('dragging');
+      // 捕获指针：拖到面板外也能继续
+      try { head.setPointerCapture(e.pointerId); } catch (err) { /* ignore */ }
+      e.preventDefault();
+      e.stopPropagation();
+    };
+
+    const onMove = (e) => {
+      if (!dragging) return;
+      const dx = e.clientX - startX;
+      const dy = e.clientY - startY;
+      if (!moved && Math.abs(dx) < 3 && Math.abs(dy) < 3) return;  // 抖动阈值
+      moved = true;
+      applyPos(panel, { left: baseLeft + dx, top: baseTop + dy });
+      e.preventDefault();
+      e.stopPropagation();
+    };
+
+    const onUp = (e) => {
+      if (!dragging) return;
+      dragging = false;
+      panel.classList.remove('dragging');
+      head.classList.remove('dragging');
+      try { head.releasePointerCapture(e.pointerId); } catch (err) { /* ignore */ }
+      if (moved) {
+        const rect = panel.getBoundingClientRect();
+        const pos = { left: Math.round(rect.left), top: Math.round(rect.top) };
+        STATE.store[DRAG_KEY] = pos;
+        try {
+          chrome.runtime.sendMessage({ cmd: 'panel:save', data: { [DRAG_KEY]: pos } });
+        } catch (err) { /* 独立运行时没有 storage */ }
+      }
+      e.stopPropagation();
+    };
+
+    head.addEventListener('pointerdown', onDown);
+    // move/up 挂在 window 上，鼠标移出面板也能继续拖
+    window.addEventListener('pointermove', onMove, true);
+    window.addEventListener('pointerup', onUp, true);
+    window.addEventListener('pointercancel', onUp, true);
+  }
+
   function bindUI(panel) {
+    makeDraggable(panel);
     panel.querySelector('#closeBtn').onclick = () => api('hide');
     panel.querySelector('#pickBtn').onclick = () => api('togglePick');
     panel.querySelector('#clearHlBtn').onclick = () => api('clearHighlight');
@@ -703,7 +809,9 @@
     switch (action) {
       case 'show':
         STATE.visible = true;
+        // 顺序很重要：先移除 hidden 让元素参与布局，再计算/恢复位置
         STATE.panel.classList.remove('hidden');
+        restorePos(STATE.panel);
         return;
       case 'hide':
         STATE.visible = false;
@@ -1280,6 +1388,13 @@
     } else if (msg.cmd === 'ping') {
       sendResponse({ ok: true });
     }
+  });
+
+  // 窗口尺寸变化时把面板收回可视区域，避免拖丢
+  window.addEventListener('resize', () => {
+    if (!STATE.panel || !STATE.visible) return;
+    const rect = STATE.panel.getBoundingClientRect();
+    applyPos(STATE.panel, { left: rect.left, top: rect.top });
   });
 
   init();

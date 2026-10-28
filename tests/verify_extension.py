@@ -280,6 +280,68 @@ def main() -> int:
         except Exception as exc:
             check('面板脚本已就绪', False, '%s: %s' % (type(exc).__name__, str(exc)[:80]))
 
+        # 2b) 面板拖动：模拟按住标题栏移动，确认位置真的改变
+        try:
+            tabs_now = http_json('http://127.0.0.1:%d/json/list' % PORT)
+            sw = next((t for t in tabs_now if t.get('type') == 'service_worker'
+                       and ext_id and ext_id in (t.get('url') or '')), None)
+            drag_result = None
+            if sw:
+                w = websocket.create_connection(sw['webSocketDebuggerUrl'], timeout=30)
+                drag_expr = """(async () => {
+                    const tabs = await chrome.tabs.query({active:true,currentWindow:true});
+                    const r = await chrome.scripting.executeScript({
+                        target: {tabId: tabs[0].id},
+                        func: async () => {
+                            const p = window.__DPC_PANEL__;
+                            if (!p) return {err:'no panel'};
+                            const el = p.state.panel;
+                            const head = el.querySelector('.head');
+                            if (!head) return {err:'no head'};
+                            // 等一帧，确保 show() 之后已完成布局
+                            await new Promise(r => requestAnimationFrame(
+                                () => requestAnimationFrame(r)));
+                            const before = el.getBoundingClientRect();
+                            const sx = before.left + 60, sy = before.top + 14;
+                            const opts = {bubbles:true, cancelable:true, clientX:sx, clientY:sy,
+                                          pointerId:1, pointerType:'mouse', button:0};
+                            head.dispatchEvent(new PointerEvent('pointerdown', opts));
+                            window.dispatchEvent(new PointerEvent('pointermove',
+                                Object.assign({}, opts, {clientX:sx-220, clientY:sy+160})));
+                            window.dispatchEvent(new PointerEvent('pointerup',
+                                Object.assign({}, opts, {clientX:sx-220, clientY:sy+160})));
+                            const after = el.getBoundingClientRect();
+                            return {
+                                before: [Math.round(before.left), Math.round(before.top)],
+                                after: [Math.round(after.left), Math.round(after.top)],
+                                saved: p.state.store.panelPos || null,
+                            };
+                        },
+                    });
+                    return JSON.stringify(r[0].result);
+                })()"""
+                w.send(json.dumps({'id': 1, 'method': 'Runtime.evaluate', 'params': {
+                    'expression': drag_expr, 'returnByValue': True, 'awaitPromise': True}}))
+                deadline = time.time() + 25
+                while time.time() < deadline:
+                    m = json.loads(w.recv())
+                    if m.get('id') == 1:
+                        drag_result = m.get('result', {}).get('result', {}).get('value')
+                        break
+                w.close()
+            if drag_result:
+                info = json.loads(drag_result)
+                before = info.get('before')
+                after = info.get('after')
+                moved = (before and after
+                         and (abs(after[0] - before[0]) > 50 or abs(after[1] - before[1]) > 50))
+                check('面板可拖动', bool(moved), '%s → %s' % (before, after))
+                check('拖动位置已记录', bool(info.get('saved')), info.get('saved'))
+            else:
+                check('面板可拖动', False, '未取到结果')
+        except Exception as exc:
+            check('面板可拖动', False, '%s: %s' % (type(exc).__name__, str(exc)[:80]))
+
         # 3) 拾取：模拟点击用户名输入框
         r = evaluate(ws_url, """
         (function () {
@@ -383,6 +445,19 @@ def main() -> int:
         v = r.get('value') or {}
         check('Shadow DOM 内元素可拾取', bool(v.get('ok')) and v.get('id') == 'shadowBtn',
               '%s inShadow=%s' % (v.get('id'), v.get('inShadow')))
+
+        # 6b) 截图存档（人工确认面板位置与渲染）
+        try:
+            import base64 as _b64
+            snap = PROJECT / 'snapshots' / 'extension_verify.png'
+            snap.parent.mkdir(parents=True, exist_ok=True)
+            sg = cdp_call(ws_url, 'Page.captureScreenshot', {'format': 'png'})
+            payload = sg and sg.get('result', {}).get('data')
+            if payload:
+                snap.write_bytes(_b64.b64decode(payload))
+                print('      截图:', snap.name, snap.stat().st_size, 'bytes')
+        except Exception as exc:
+            print('      截图失败(不影响结论):', type(exc).__name__)
 
         # 7) 检查页面是否出现扩展注入的 JS 报错
         r = evaluate(ws_url, 'window.__errors ? window.__errors.length : 0')

@@ -18,3 +18,6 @@ dist_client/
 .idea/
 .DS_Store
 Thumbs.db
+
+# 扩展启动脚本创建的独立 Chrome 配置目录（含缓存，不应入库）
+.chrome-profile/

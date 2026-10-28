@@ -35,6 +35,7 @@
     <button class="btn ghost" id="clearHlBtn" title="清除页面上的高亮框">清除高亮</button>
     <button class="btn" id="browserBtn">启动浏览器</button>
     <button class="btn ghost" id="restartBtn" title="浏览器卡住或无响应时使用">重启</button>
+    <button class="btn ghost" id="settingsBtn" title="端口等设置">⚙ 设置</button>
   </div>
 </header>
 
@@ -255,6 +256,51 @@
 </div>
 
 <div class="toasts" id="toasts"></div>
+
+<!-- 设置对话框 -->
+<div class="modal" id="settingsModal" hidden>
+  <div class="modal-box settings-box">
+    <div class="modal-head">
+      <strong>设置</strong>
+      <div class="spacer"></div>
+      <button class="btn small ghost" id="settingsClose">关闭</button>
+    </div>
+    <div class="settings-body">
+      <section class="set-section">
+        <h4>浏览器调试端口</h4>
+        <p class="set-desc">
+          受控 Chromium 的远程调试端口（默认 <code>9333</code>）。
+          改动后需要重启浏览器生效；端口被占用时会提示。
+        </p>
+        <div class="set-row">
+          <input type="number" id="debugPortInput" min="1024" max="65535" step="1">
+          <button class="btn small primary" id="applyDebugPort">保存</button>
+          <button class="btn small ghost" id="resetDebugPort">恢复默认</button>
+          <span class="set-hint" id="debugPortHint"></span>
+        </div>
+      </section>
+
+      <section class="set-section">
+        <h4>控制台 Web 端口</h4>
+        <p class="set-desc">
+          本控制台页面的访问端口（默认 <code>8777</code>）。改动后<strong>下次启动生效</strong>：
+          桌面版会直接使用该端口，源码运行请用 <code>python run.py</code> 重启。
+        </p>
+        <div class="set-row">
+          <input type="number" id="webPortInput" min="1024" max="65535" step="1">
+          <button class="btn small primary" id="applyWebPort">保存</button>
+          <button class="btn small ghost" id="resetWebPort">恢复默认</button>
+          <span class="set-hint" id="webPortHint"></span>
+        </div>
+      </section>
+
+      <section class="set-section">
+        <h4>配置文件</h4>
+        <p class="set-desc">以上设置保存在：<code id="settingsPath">—</code></p>
+      </section>
+    </div>
+  </div>
+</div>
 
 <script src="/static/app.js"></script>
 </body>

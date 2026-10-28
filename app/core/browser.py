@@ -122,12 +122,18 @@ class BrowserSession:
         self._pump: Optional[threading.Thread] = None
         self._stopping = threading.Event()
         self._dirty = 0
-        self._busy = False  # 有长操作进行中（如导航），暂停抓帧
         self._last_info: dict = {}  # 帧泵顺带缓存的最新页面信息，供 status 只读使用
 
         # 统计
-        self.stats = {'frames': 0, 'frame_errors': 0, 'picks': 0, 'actions': 0}
+        self.stats = {'frames': 0, 'frame_errors': 0, 'picks': 0, 'actions': 0,
+                      'cast_frames': 0, 'shot_frames': 0}
         self._seen_rev: dict[int, int] = {}
+        # CDP screencast：浏览器主动推「有变化」的帧，替代轮询截图
+        self._cast_on = False
+        self._cast_pending: Optional[tuple] = None   # (data, metadata)
+        self._cast_lock = threading.Lock()
+        self._cast_last_ts = 0.0
+        self._frame_seq = 0
         # 进程正常退出时顺手关掉浏览器，避免留下孤儿 Chromium 进程
         atexit.register(self._atexit_cleanup)
 
@@ -236,9 +242,11 @@ class BrowserSession:
         except Exception:
             pass
         try:
-            page.set.load_mode = settings.load_mode
-        except Exception:
-            pass
+            # DrissionPage 的 load_mode 是「可调用对象」，必须用 .eager() 这种方式设置；
+            # 早先写成 page.set.load_mode = xxx 会抛 AttributeError 被吞掉，等于从未生效。
+            getattr(page.set.load_mode, settings.load_mode)()
+        except Exception as exc:
+            log.warning('设置 load_mode=%s 失败: %s', settings.load_mode, exc)
         try:
             page.set.retry_times = settings.retry_times
             page.set.retry_interval = settings.retry_interval
@@ -258,7 +266,9 @@ class BrowserSession:
         target = url or settings.start_url
         if target:
             try:
-                page.get(self._as_url(target))
+                # 与 navigate 一致：发出导航即返回，不等 CDP 响应
+                self._send_navigate(self._as_url(target))
+                self._wait_document_ready(2.0)
             except Exception as exc:
                 log.warning('初始导航失败: %s', exc)
         self._inject_all()
@@ -278,6 +288,7 @@ class BrowserSession:
         return 'https://' + target.lstrip('/')
 
     def stop(self, force: bool = False) -> dict:
+        self._stop_cast()
         with self._lock:
             page = self._page
             owned = self._owns_browser
@@ -325,23 +336,33 @@ class BrowserSession:
             log.warning('add_init_js 失败: %s', exc)
 
     def _inject_all(self) -> None:
-        """向主文档与所有 iframe 注入拾取器。"""
+        """向主文档注入拾取器。
+
+        这里刻意**不**遍历 iframe：get_frames() 会去连接每个 child frame，
+        页面刚切换时未加载完的 iframe 会把整段逻辑拖到 8 秒以上（实测百度 8.7 秒）。
+        框架内的拾取器改为按需注入 —— 只有用户真的「进入框架」时才注入那一个。
+        """
+        self._inject_light()
+
+    def _inject_frame(self, frame_path: list) -> None:
+        """仅在需要时向指定层级的 iframe 注入拾取器。"""
+        if not frame_path:
+            return
         try:
-            self.page.run_js(self._picker_js)
+            owner = self._owner_locked(frame_path)
+            owner.run_js(self._picker_js, timeout=2)
         except Exception as exc:
-            log.debug('主文档注入失败: %s', exc)
-        try:
-            for fr in self.page.get_frames():
-                try:
-                    fr.run_js(self._picker_js)
-                except Exception:
-                    continue
-        except Exception:
-            pass
+            log.debug('框架注入失败: %s', exc)
 
     def _drain_locked(self) -> Optional[dict]:
+        """页内 drain：取变更计数与事件队列。
+
+        走 CDP Runtime.evaluate 的短超时版本；拿不到（文档切换中）就返回 None，
+        由调用方下轮重试 —— 绝不在这里长时间阻塞。
+        """
         try:
-            got = self.page.run_js('return window.__DPC__ ? window.__DPC__.drain() : null;')
+            got = self.page.run_js('return window.__DPC__ ? window.__DPC__.drain() : null;',
+                                   timeout=1)
         except Exception:
             return None
         if not got:
@@ -352,6 +373,27 @@ class BrowserSession:
             except Exception:
                 return None
         return got
+
+    def _inject_light(self) -> None:
+        """帧泵补注入拾取器（不占主锁）。"""
+        page = self._page
+        if page is None:
+            return
+        try:
+            page.run_js(self._picker_js, timeout=0.6)
+        except Exception:
+            pass
+
+    def _drain_light(self) -> Optional[dict]:
+        """帧泵专用：绕过 self._lock 直接取页面状态，避免与导航/动作争锁。"""
+        got = self._eval_js('window.__DPC__ ? JSON.stringify(window.__DPC__.drain()) : null',
+                            timeout=1.5)
+        if not got:
+            return None
+        try:
+            return json.loads(got) if isinstance(got, str) else got
+        except Exception:
+            return None
 
     # ------------------------------------------------------------------ 帧泵
 
@@ -388,84 +430,179 @@ class BrowserSession:
         self._stopping.clear()
         self._pump = threading.Thread(target=self._pump_loop, name='dpc-frame-pump', daemon=True)
         self._pump.start()
+        # 启动即尝试开启 screencast；无观看者时 pump 会把它关掉
+        if settings.stream_enabled:
+            self._start_cast()
 
     def stop_pump(self) -> None:
         self._stopping.set()
 
     def _pump_loop(self) -> None:
-        last_rev = -1
+        """帧泵主循环。
+
+        screencast（浏览器主动推变化帧）是主链路；captureScreenshot 只在
+        screencast 不可用、或长时间没有新帧时兜底，避免 Canvas/视频类
+        内容看起来静止。
+
+        所有页面读取都走 _eval_js（CDP Runtime.evaluate），不占 self._lock，
+        因此导航/元素操作进行中画面也能持续更新。
+        """
         last_url = None
-        force_at = 0.0
-        last_push = 0.0
+        last_rev = -1
+        last_cast = 0.0
+        last_shot = 0.0
         missed = 0
         while not self._stopping.is_set():
-            interval = max(0.02, settings.poll_ms / 1000.0)
             t0 = time.perf_counter()
             try:
                 with self._subs_lock:
                     viewers = len(self._subs)
                 if not viewers or not is_view_stream_enabled():
-                    time.sleep(0.25)
+                    self._stop_cast()
+                    time.sleep(0.2)
                     continue
                 if not self.is_alive():
-                    time.sleep(0.5)
+                    self._stop_cast()
+                    time.sleep(0.4)
                     continue
 
-                with self._lock:
-                    info = self._drain_locked()
-                now = time.time()
-
+                info = self._drain_light()
                 if info is None:
-                    # 拾取器不存在（新文档 / 未注入）→ 补注入
                     missed += 1
                     if missed % 20 == 1:
-                        with self._lock:
-                            self._inject_all()
+                        self._inject_light()
                     info = {}
                 else:
                     missed = 0
                     self._last_info = info
-                    if info.get('events'):
-                        for ev in info['events']:
-                            ev['url'] = info.get('url')
-                            if ev.get('kind') == 'pick':
-                                self.stats['picks'] += 1
-                            self._broadcast_event({'type': 'page_event', 'event': ev})
-
-                rev = int(info.get('rev', -1))
-                changed = rev != last_rev
-                force_due = now >= force_at
-                busy = self._busy
-                need = self._dirty > 0 or force_due or (changed and not busy)
-
-                min_interval = 1.0 / max(1, settings.preset['max_fps'])
-                if need and not busy and (now - last_push) >= min_interval:
-                    shot = self._grab_frame(info, t0)
-                    if shot:
-                        self._broadcast_frame(shot)
-                        self.stats['frames'] += 1
-                        last_push = now
-                        last_rev = rev
-                        force_at = now + settings.preset['force_ms'] / 1000.0
-                        if self._dirty > 0:
-                            self._dirty -= 1
-                    else:
-                        self.stats['frame_errors'] += 1
-                        force_at = now + 0.6
+                    for ev in info.get('events') or []:
+                        ev['url'] = info.get('url')
+                        if ev.get('kind') == 'pick':
+                            self.stats['picks'] += 1
+                        self._broadcast_event({'type': 'page_event', 'event': ev})
 
                 url = info.get('url')
                 if url and url != last_url:
                     last_url = url
-                    self._broadcast_event({'type': 'nav', 'url': url, 'title': info.get('title', '')})
-                    with self._lock:
-                        self._inject_all()
+                    self._broadcast_event({'type': 'nav', 'url': url,
+                                           'title': info.get('title', '')})
+                    # 新文档：screencast 会话随旧文档失效，重新开启；只注入主文档
+                    self._stop_cast()
+                    self._inject_light()
+                    self._start_cast()
                     self.mark_dirty(3)
+
+                # 1) 优先把 screencast 的新帧推出去（一次最多一片，避免堆积）
+                if self._flush_cast(info):
+                    last_cast = time.perf_counter()
+
+                # 2) 兜底：screencast 不可用，或超过 force_ms 没有任何新帧
+                rev = int(info.get('rev', -1))
+                idle_cast = (time.perf_counter() - last_cast) > settings.preset['force_ms'] / 1000.0
+                if not self._cast_on or idle_cast:
+                    need = (self._dirty > 0) or (rev != last_rev) or idle_cast
+                    if need and (time.perf_counter() - last_shot) >= 0.1:
+                        shot = self._grab_frame(info, t0)
+                        if shot:
+                            self._broadcast_frame(shot)
+                            self.stats['frames'] += 1
+                            self.stats['shot_frames'] += 1
+                            last_shot = time.perf_counter()
+                            last_rev = rev
+                            if self._dirty > 0:
+                                self._dirty -= 1
+                        else:
+                            self.stats['frame_errors'] += 1
             except Exception as exc:  # 帧泵绝不退出
                 self.stats['frame_errors'] += 1
                 log.debug('帧泵异常: %s', exc)
-                time.sleep(0.4)
+                time.sleep(0.3)
             spent = time.perf_counter() - t0
-            time.sleep(max(0.0, interval - spent))
+            time.sleep(max(0.005, settings.poll_ms / 1000.0 - spent))
+
+    # ------------------------------------------------------------ screencast
+
+    def _start_cast(self) -> None:
+        """开启 CDP screencast（幂等）。失败则静默退回截图模式。"""
+        if self._cast_on:
+            return
+        try:
+            with self._lock:
+                page = self.page
+                page.driver.set_callback('Page.screencastFrame', self._on_cast_frame)
+                page.run_cdp('Page.startScreencast', format='jpeg',
+                             quality=settings.preset['quality'], everyNthFrame=1,
+                             maxWidth=settings.window_width, maxHeight=settings.window_height)
+            self._cast_on = True
+            log.info('screencast 已开启')
+        except Exception as exc:
+            self._cast_on = False
+            log.info('screencast 不可用，改用截图模式: %s', exc)
+
+    def _stop_cast(self) -> None:
+        if not self._cast_on:
+            return
+        self._cast_on = False
+        try:
+            with self._lock:
+                self.page.run_cdp('Page.stopScreencast')
+                self.page.driver.set_callback('Page.screencastFrame', None)
+        except Exception:
+            pass
+        with self._cast_lock:
+            self._cast_pending = None
+
+    def _on_cast_frame(self, **kw) -> None:
+        """screencast 回调（在 DrissionPage 事件线程里执行，必须极快返回）。
+
+        ACK 直接走 driver.run（CDP 调用按 id 独立排队、本身线程安全），
+        绝不经过 self._lock —— 否则会和导航/元素操作抢锁，把导航拖慢十几秒。
+        """
+        data = kw.get('data')
+        if not data:
+            return
+        session_id = kw.get('sessionId')
+        with self._cast_lock:
+            # 只保留最新帧：客户端跟不上时丢弃旧帧，避免延迟越积越大
+            self._cast_pending = (data, kw.get('metadata') or {}, session_id)
+        if session_id:
+            try:
+                page = self._page
+                if page is not None:
+                    page.driver.run('Page.screencastFrameAck', sessionId=session_id, _timeout=3)
+            except Exception:
+                pass
+
+    def _flush_cast(self, info: dict) -> bool:
+        """把待推送的 screencast 帧转成标准 frame 消息广播出去。"""
+        with self._cast_lock:
+            pending = self._cast_pending
+            self._cast_pending = None
+        if not pending:
+            return False
+        data, meta, _ = pending
+        self._cast_last_ts = time.time()
+        self._frame_seq += 1
+        iw = float(info.get('iw') or meta.get('deviceWidth') or settings.window_width)
+        ih = float(info.get('ih') or meta.get('deviceHeight') or settings.window_height)
+        frame = {
+            'type': 'frame',
+            'data': data,
+            'cw': iw, 'ch': ih,
+            'scale': 1.0, 'dpr': float(info.get('dpr') or 1.0),
+            'sx': meta.get('scrollOffsetX', info.get('sx')),
+            'sy': meta.get('scrollOffsetY', info.get('sy')),
+            'url': info.get('url'), 'title': info.get('title'),
+            'rev': info.get('rev'),
+            'ts': int(time.time() * 1000),
+            'seq': self._frame_seq,
+            'src': 'cast',
+            'grab_ms': 0,
+        }
+        self._broadcast_frame(frame)
+        self.stats['frames'] += 1
+        self.stats['cast_frames'] += 1
+        return True
 
     def _grab_frame(self, info: dict, t0: float) -> Optional[dict]:
         iw = float(info.get('iw') or 0.0)
@@ -572,14 +709,92 @@ class BrowserSession:
         return self._op(self._navigate_locked, url)
 
     def _navigate_locked(self, url: str) -> dict:
-        self._busy = True
+        """导航到目标地址（立即返回，不等页面加载）。
+
+        踩过的坑：
+          * page.get() 会阻塞到 load 完成（外网站点实测 11 秒）；
+          * 就算改用 Page.navigate，CDP 的**响应**也可能被 Chrome 拖到 10 秒
+            （Wikipedia / web.dev 实测），但此时页面其实早就可交互了
+            —— Runtime.evaluate 立刻就能返回。
+        所以这里用 fire-and-forget：命令发出去不等响应，随后靠 _eval_js
+        轻量探活。用户能立刻看到画面开始变化，而不是干等。
+        """
+        target = self._as_url(url)
+        self._send_navigate(target)
+        # 短暂等文档切换过来，再注入拾取器并触发几帧
+        self._wait_document_ready(1.2)
+        self._after_navigation()
+        url_now = self._safe_url(target)
+        title = self._safe_title() if url_now != target else ''
+        return {'url': url_now, 'title': title}
+
+    def _send_navigate(self, target: str) -> None:
+        """发出导航命令但不等待其响应（_timeout=0 表示不等待）。"""
         try:
-            self.page.get(self._as_url(url))
-        finally:
-            self._busy = False
+            self.page.run_cdp('Page.navigate', url=target, _timeout=0)
+        except Exception:
+            # 老版本没有 _timeout=0 语义时退回一个较短超时，仍不影响可用性
+            try:
+                self.page.run_cdp('Page.navigate', url=target, _timeout=2)
+            except Exception as exc:
+                log.debug('导航命令发送失败: %s', exc)
+
+    def _wait_document_ready(self, timeout: float) -> None:
+        """只等到文档开始可用（interactive），不等图片等资源加载完。
+
+        注意：导航刚发出时旧文档仍是 complete，所以必须等 readyState 先回到
+        loading 再回到 interactive；如果一直没观察到 loading（缓存命中瞬时切换），
+        就在超时后直接返回，由调用方继续。
+        """
+        deadline = time.perf_counter() + timeout
+        saw_loading = False
+        while time.perf_counter() < deadline:
+            # 单次探活必须短：重前端站点会占满主线程，evaluate 要排队，
+            # 用 2 秒超时会让「等待就绪」这一步白白耗掉好几秒。
+            state = self._eval_js('document.readyState', timeout=0.4)
+            if state is None:
+                # 主线程繁忙 / 文档切换中：不要再堆请求，直接让步
+                time.sleep(0.12)
+                continue
+            if state == 'loading':
+                saw_loading = True
+            elif state in ('interactive', 'complete') and saw_loading:
+                return
+            time.sleep(0.04)
+
+    def _after_navigation(self, burst: int = 6) -> None:
+        # 注入失败不必重试：帧泵发现 window.__DPC__ 缺失时会自己补注入
         self._inject_all()
-        self.mark_dirty(6)
-        return {'url': self.page.url, 'title': self.page.title}
+        self.mark_dirty(burst)
+
+    def _eval_js(self, expression: str, timeout: float = 2.0):
+        """直接经 CDP evaluate，绕开 page.run_js/page.url 的阻塞等待。
+
+        DrissionPage 的 page.url 会等文档加载完成（外网实测 1.5 秒以上），
+        page.run_js 在文档切换瞬间还会抛「页面被刷新」。帧泵与导航探活都不能忍受这些。
+        """
+        page = self._page
+        if page is None:
+            return None
+        try:
+            res = page.driver.run('Runtime.evaluate', expression=expression,
+                                  returnByValue=True, _timeout=timeout)
+        except Exception:
+            return None
+        if not isinstance(res, dict) or res.get('error'):
+            return None
+        result = res.get('result') or {}
+        if result.get('exceptionDetails'):
+            return None
+        return result.get('value')
+
+    def _safe_url(self, fallback: str = '') -> str:
+        got = self._eval_js('location.href', timeout=0.5)
+        return got if isinstance(got, str) and got else fallback
+
+    def _safe_title(self) -> str:
+        got = self._eval_js('document.title', timeout=0.5)
+        return got if isinstance(got, str) else ''
 
     def back(self) -> dict:
         return self._op(self._hist_locked, 'back')
@@ -588,27 +803,24 @@ class BrowserSession:
         return self._op(self._hist_locked, 'forward')
 
     def _hist_locked(self, how: str) -> dict:
-        self._busy = True
-        try:
-            getattr(self.page, how)()
-        finally:
-            self._busy = False
-        self._inject_all()
-        self.mark_dirty(6)
-        return {'url': self.page.url, 'title': self.page.title}
+        # 同上：用 history API 而非 page.back()，避免页面未加载完时长时间阻塞
+        self.page.run_js('history.%s();' % how, timeout=3)
+        self._wait_document_ready(2.0)
+        self._after_navigation()
+        return {'url': self._safe_url(), 'title': self._safe_title()}
 
     def refresh(self) -> dict:
         return self._op(self._refresh_locked)
 
     def _refresh_locked(self) -> dict:
-        self._busy = True
         try:
-            self.page.refresh()
-        finally:
-            self._busy = False
-        self._inject_all()
-        self.mark_dirty(6)
-        return {'url': self.page.url}
+            self.page.run_js('location.reload();', timeout=3)
+        except Exception:
+            # 文档正在卸载时执行 JS 可能失败，退回 CDP
+            self.page.run_cdp('Page.reload', _timeout=5)
+        self._wait_document_ready(2.0)
+        self._after_navigation()
+        return {'url': self._safe_url()}
 
     def resize(self, width: int, height: int) -> dict:
         def run():
@@ -718,7 +930,9 @@ class BrowserSession:
         offset = self._frame_offset_locked(frame_path)
         lx = float(x) - offset[0]
         ly = float(y) - offset[1]
-        owner.run_js(self._picker_js)
+        # 只在框架内按需注入拾取器（主文档由 _inject_all 保证已注入）
+        if frame_path and not owner.run_js('return !!(window.__DPC__);'):
+            owner.run_js(self._picker_js)
         desc = owner.run_js('return window.__DPC__.pickAt(%s, %s, false);' % (lx, ly))
         if not desc:
             raise ElementLostError('该坐标上没有可捕获的元素')
@@ -848,7 +1062,7 @@ class BrowserSession:
             }
             try:
                 parent, last = self._resolve_parent_locked(owner, spec)
-                eles = self._eles_of(parent, last, many=True)
+                eles = self._resolve_with_retry(parent, last)
                 item['count'] = len(eles)
                 for idx, ele in enumerate(eles):
                     if idx == 0:
@@ -886,6 +1100,21 @@ class BrowserSession:
             if not obj:
                 raise ElementLostError(f'相对定位失败：{step}')
         return obj, steps[-1]
+
+    def _resolve_with_retry(self, parent, last, attempts: int = 2):
+        """在元素内解析最后一级表达式，带一次重试。
+
+        页面仍在渲染时，锚点可能刚被替换或还没稳定，单次调用会偶发失败；
+        重试一次即可覆盖绝大多数这类抖动，同时不至于拖慢校验。
+        """
+        try:
+            return self._eles_of(parent, last, many=True)
+        except Exception:
+            if attempts <= 1:
+                raise
+            time.sleep(0.12)
+            # 锚点可能已失效，重新解析一次
+            return self._eles_of(parent, last, many=True)
 
     def _eles_of(self, obj, step, many: bool):
         if isinstance(step, str) and step.startswith(SHADOW_PREFIX):

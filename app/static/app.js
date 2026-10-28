@@ -867,6 +867,81 @@ async function refreshStatus() {
 
 /* ------------------------------------------------------------------ 绑定 */
 
+/* --------------------------------------------------------------- 设置面板 */
+
+let S_PORTS = null;
+
+function setHint(id, text, level) {
+  const node = $(id);
+  node.textContent = text || '';
+  node.className = 'set-hint' + (level ? ' ' + level : '');
+}
+
+async function openSettings() {
+  $('settingsModal').hidden = false;
+  const res = await api('/api/ports');
+  if (!res || !res.ok) {
+    setHint('debugPortHint', '读取配置失败', 'danger');
+    return;
+  }
+  S_PORTS = res;
+  $('debugPortInput').value = res.debug_port;
+  $('webPortInput').value = res.web_port;
+  $('settingsPath').textContent = res.settings_file || '—';
+  setHint('debugPortHint', res.debug_port === res.debug_port_default ? '当前为默认值' : '已自定义');
+  setHint('webPortHint',
+    res.web_port === res.web_port_default ? '当前为默认值' : '已自定义，下次启动生效');
+}
+
+async function applyPort(kind) {
+  const isDebug = kind === 'debug';
+  const inputId = isDebug ? 'debugPortInput' : 'webPortInput';
+  const hintId = isDebug ? 'debugPortHint' : 'webPortHint';
+  const raw = $(inputId).value.trim();
+  if (!/^\d+$/.test(raw)) { setHint(hintId, '请输入数字端口', 'danger'); return; }
+  const port = parseInt(raw, 10);
+  if (port < 1024 || port > 65535) {
+    setHint(hintId, '端口需在 1024–65535 之间', 'danger');
+    return;
+  }
+  const res = await api(isDebug ? '/api/ports/debug' : '/api/ports/web', {port});
+  if (!res || !res.ok) {
+    setHint(hintId, (res && res.error) || '保存失败', 'danger');
+    return;
+  }
+  if (!res.changed) {
+    setHint(hintId, '与当前一致，未改动', 'ok');
+    return;
+  }
+  let msg = res.port_busy
+    ? `已保存为 ${port}（注意：该端口当前被占用）`
+    : `已保存为 ${port} · ${res.note || ''}`;
+  setHint(hintId, msg, res.port_busy ? 'warn' : 'ok');
+  if (isDebug) {
+    toast(`调试端口改为 ${port}，点「重启」后生效`, 'ok');
+  } else {
+    toast(`控制台端口改为 ${port}，下次启动生效`, 'ok');
+  }
+  openSettings();
+}
+
+async function resetPort(kind) {
+  const isDebug = kind === 'debug';
+  const target = isDebug
+    ? (S_PORTS && S_PORTS.debug_port_default) || 9333
+    : (S_PORTS && S_PORTS.web_port_default) || 8777;
+  $(isDebug ? 'debugPortInput' : 'webPortInput').value = target;
+  await applyPort(kind);
+}
+
+function bindSettings() {
+  $('settingsClose').onclick = () => { $('settingsModal').hidden = true; };
+  $('applyDebugPort').onclick = () => applyPort('debug');
+  $('applyWebPort').onclick = () => applyPort('web');
+  $('resetDebugPort').onclick = () => resetPort('debug');
+  $('resetWebPort').onclick = () => resetPort('web');
+}
+
 function bindUI() {
   all('.tab').forEach(t => t.addEventListener('click', () => {
     all('.tab').forEach(x => x.classList.remove('active'));
@@ -902,6 +977,8 @@ function bindUI() {
       setTimeout(refreshStatus, 400);
     }
   };
+
+  $('settingsBtn').onclick = openSettings;
 
   $('restartBtn').onclick = async () => {
     const btn = $('restartBtn');
@@ -1029,6 +1106,7 @@ function bindUI() {
   document.addEventListener('keydown', (e) => {
     if (e.key === 'Escape') {
       $('modal').hidden = true;
+      $('settingsModal').hidden = true;
     }
   });
 }
@@ -1053,6 +1131,7 @@ function afterNav(res) {
 /* ------------------------------------------------------------------ 启动 */
 
 bindUI();
+bindSettings();
 bindViewport();
 renderScopeBar();
 connect();

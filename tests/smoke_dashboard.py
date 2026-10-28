@@ -146,6 +146,25 @@ def main() -> int:
         print('[%s] 点击候选后代码已刷新（%s → %s）'
               % ('OK' if code_len2 > 0 else 'FAIL', code_len, code_len2))
 
+        # 设置面板（端口自定义）
+        viewer.run_js("document.getElementById('settingsBtn').click();")
+        time.sleep(1.5)
+        modal_open = viewer.run_js(
+            "return !document.getElementById('settingsModal').hidden;")
+        dbg = viewer.run_js("return document.getElementById('debugPortInput').value;")
+        web = viewer.run_js("return document.getElementById('webPortInput').value;")
+        path_txt = viewer.run_js("return document.getElementById('settingsPath').textContent;")
+        print('[%s] 设置面板：打开=%s 调试端口=%s 控制台端口=%s'
+              % ('OK' if modal_open and dbg else 'FAIL', modal_open, dbg, web))
+        # 填非法值，验证前端校验提示
+        viewer.run_js("document.getElementById('debugPortInput').value='80';"
+                      "document.getElementById('applyDebugPort').click();")
+        time.sleep(1.2)
+        hint = viewer.run_js("return document.getElementById('debugPortHint').textContent;")
+        print('[%s] 非法端口提示：%s' % ('OK' if '1024' in (hint or '') else 'FAIL', hint))
+        viewer.run_js("document.getElementById('settingsClose').click();")
+        time.sleep(0.3)
+
         # 缩放按钮
         viewer.run_js("document.getElementById('zoomInBtn').click();")
         time.sleep(0.6)

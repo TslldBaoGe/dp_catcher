@@ -10,7 +10,7 @@
 (function () {
   'use strict';
 
-  var VER = 7;
+  var VER = 13;
   if (window.__DPC__ && window.__DPC__.ver === VER) {
     return;
   }
@@ -57,6 +57,12 @@
       }
     }
     return cap(out.replace(/\s+/g, ' ').trim(), 200);
+  }
+
+  function rawTextOf(el) {
+    // 保留换行：<br> / 块级子元素造成的分行是文本定位能否命中的关键
+    var t = (el.innerText != null && el.innerText !== '') ? el.innerText : el.textContent;
+    return cap((t || ''), TEXT_CAP);
   }
 
   function attrsOf(el) {
@@ -374,10 +380,41 @@
         { t: 'tagattr', v: [tag, 'class', attrs['class']] }, '整串 class 精确匹配', 55);
     }
 
-    // 4) 纯文本（叶子节点、短文本、唯一）
+    // 4) 纯文本
+    //    叶子优先；短容器也纳入。重前端站点（Angular / B站 / 淘宝）的 class 多为
+    //    自动生成，文本往往是这类元素唯一稳定的锚点。
     var own = ownTextOf(el);
-    if (own && own.length <= 30 && own.length >= 1 && el.children.length === 0) {
-      push('text', 'text=' + own, { t: 'text', v: own }, '精确文本（易随文案变化，稳定性低）', 40);
+    var leafLike = el.children.length === 0;
+    if ((own || textOf(el)) && (own || textOf(el)).length <= 40) {
+      // 优先用完整可见文本（innerText 会在块级子元素之间保留空格，
+      // 比拼接直接文本节点的 ownText 更接近用户看到的文字）
+      var fullText = rawTextOf(el);
+      var textForLoc = leafLike ? (own || fullText) : fullText;
+      if (leafLike) {
+        if (textForLoc) {
+          push('text', 'text=' + textForLoc, { t: 'text', v: textForLoc },
+            '精确文本（易随文案变化）', 40);
+          if (textForLoc.length >= 4) {
+            var head = textForLoc.slice(0, Math.max(2, Math.floor(textForLoc.length * 0.6)));
+            push('text', 'text=' + head, { t: 'text', v: head },
+              '文本前缀匹配（允许部分变化）', 34);
+          }
+        }
+      } else if (el.children.length <= 3 && fullText) {
+        // DrissionPage 的 text= 要求「元素全部文本」精确相等，含子元素时基本用不到；
+        // tx= 是包含匹配。注意：文本被 <br>/块级子元素拆成多行时，跨行匹配无效，
+        // 所以这里按行拆开，只用「单行片段」做候选（实测 tx=Productivity 可命中 h2）。
+        var segs = [];
+        String(fullText).split(/[\r\n]+/).forEach(function (line) {
+          line = line.trim();
+          if (line.length >= 2 && line.length <= 40) { segs.push(line); }
+        });
+        if (segs.length && segs.length <= 3) {
+          push('text', 'tx=' + segs[0], { t: 'text', v: segs[0] },
+            segs.length > 1 ? '容器首行文本匹配（多行结构）' : '容器文本包含匹配', 44);
+          // 跨行合并的文本在 <br> 结构下匹配不到，不再生成这种无效候选
+        }
+      }
     }
 
     // 5) CSS 路径兜底

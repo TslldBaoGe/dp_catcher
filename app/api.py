@@ -158,6 +158,71 @@ async def browser_stream(payload: dict = Body(default={})):
     return {'ok': True, 'enabled': settings.stream_enabled}
 
 
+# ---------------------------------------------------------- 端口等可配置项
+
+def _port_ok(value) -> tuple:
+    try:
+        port = int(value)
+    except (TypeError, ValueError):
+        return False, 0, '端口必须是数字'
+    if not (1024 <= port <= 65535):
+        return False, 0, '端口需在 1024–65535 之间'
+    return True, port, ''
+
+
+def _port_in_use(port: int) -> bool:
+    import socket
+    with socket.socket() as sock:
+        sock.settimeout(0.25)
+        return sock.connect_ex(('127.0.0.1', int(port))) == 0
+
+
+@app.get('/api/ports')
+async def get_ports():
+    """当前端口配置，供界面显示。"""
+    from .config import SETTINGS_FILE
+    return {
+        'ok': True,
+        'debug_port': settings.debug_port,
+        'debug_port_default': 9333,
+        'web_port': settings.port,
+        'web_port_default': 8777,
+        'settings_file': str(SETTINGS_FILE),
+        'desktop': bool(os.environ.get('DPC_DESKTOP')),
+    }
+
+
+@app.post('/api/ports/debug')
+async def set_debug_port(payload: dict = Body(default={})):
+    """修改浏览器调试端口；保存后需重启浏览器生效。"""
+    from .config import save_user_settings
+    ok, port, err = _port_ok(payload.get('port'))
+    if not ok:
+        return {'ok': False, 'error': err, 'error_type': 'BadPort'}
+    old = settings.debug_port
+    if port == old:
+        return {'ok': True, 'debug_port': port, 'changed': False}
+    busy = _port_in_use(port)
+    settings.debug_port = port
+    save_user_settings({'debug_port': port})
+    return {'ok': True, 'debug_port': port, 'old': old, 'changed': True,
+            'port_busy': busy, 'note': '已保存，点「重启」后生效'}
+
+
+@app.post('/api/ports/web')
+async def set_web_port(payload: dict = Body(default={})):
+    """修改控制台 Web 端口；下次启动生效。"""
+    from .config import save_user_settings
+    ok, port, err = _port_ok(payload.get('port'))
+    if not ok:
+        return {'ok': False, 'error': err, 'error_type': 'BadPort'}
+    old = settings.port
+    busy = _port_in_use(port)
+    save_user_settings({'port': port})
+    return {'ok': True, 'port': port, 'old': old, 'changed': port != old,
+            'port_busy': busy, 'note': '已保存，下次启动生效'}
+
+
 # --------------------------------------------------------------------- 导航
 
 @app.post('/api/navigate')

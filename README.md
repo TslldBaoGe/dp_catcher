@@ -297,7 +297,9 @@ python tests/run_all.py --only e2e -v   # 只跑浏览器端到端
 | `tests/test_locators.py` | 评分与编排：唯一/错位/不唯一/未匹配/语法错误、A-D 稳定性评级、动态值扣分、去重、相对定位、批量下发 |
 | `tests/test_e2e.py` | 真实浏览器：拾取、身份比对、高亮几何、相对定位、点击/输入/取文本/取属性/下拉/勾选、坐标点击、滚轮、框架、Shadow DOM、刷新后重定位、导航后拾取器自愈 |
 | `tests/test_server_e2e.py` | 真起 uvicorn：HTTP 全接口（含用法片段与桌面关停令牌）+ WebSocket 帧推送与拾取 + 浏览器停止/重启 |
-| `tests/smoke_dashboard.py` | 控制台前端人工冒烟：捕获 JS 报错、镜像帧、模拟点击捕获、缩放，并截图 |
+| `tests/smoke_dashboard.py` | 控制台前端人工冒烟：捕获 JS 报错、镜像帧、模拟点击捕获、缩放、设置面板，并截图 |
+| `tests/stress_sites.py` | 真站压测：16 个高难度网站（反爬/SPA/Shadow DOM/长页面）测导航耗时、首帧延迟、定位命中率 |
+| `tests/verify_packaged.py` | 打包产物验证：直接驱动 exe 跑完整捕获链路（19 项检查） |
 
 跳过浏览器用例：`set DPC_SKIP_BROWSER_TESTS=1`。
 

@@ -25,6 +25,7 @@ API_PY = (STATIC_DIR.parent / 'api.py').read_text(encoding='utf-8')
 # 只允许用 GET 调用的接口（与 api.py 中的 @app.get 保持一致）
 GET_ENDPOINTS = {
     '/api/settings', '/api/status', '/api/frames', '/api/describe', '/api/history',
+    '/api/ports',
 }
 
 

@@ -10,6 +10,7 @@ import base64
 import os
 import struct
 import sys
+import threading
 import time
 import unittest
 
@@ -17,7 +18,7 @@ sys.path.insert(0, os.path.dirname(os.path.dirname(os.path.abspath(__file__))))
 
 from app.config import DEMO_PAGE, settings  # noqa: E402
 from app.core import workflow  # noqa: E402
-from app.core.browser import session  # noqa: E402
+from app.core.browser import Subscriber, session  # noqa: E402
 
 DEMO_URL = 'file:///' + str(DEMO_PAGE).replace(os.sep, '/')
 SKIP = os.environ.get('DPC_SKIP_BROWSER_TESTS') == '1'
@@ -95,11 +96,25 @@ class BrowserE2ETest(unittest.TestCase):
             return [float(x), float(y), float(w), float(h)]
 
     def inner_rect(self, frame_locator, inner_locator):
-        """iframe 内部元素相对该框架视口的矩形。"""
-        fr = self.page.get_frame(frame_locator)
-        got = fr.ele(inner_locator, timeout=2).run_js(
-            'var r=this.getBoundingClientRect();return [r.left, r.top, r.width, r.height];')
-        return [float(v) for v in got]
+        """iframe 内部元素相对该框架视口的矩形。
+
+        load_mode 现在是 none（不等资源加载），iframe 内容可能还没就绪，
+        这里显式重试，避免把「加载慢」误判成「功能坏了」。
+        """
+        deadline = time.time() + 8
+        last = None
+        while time.time() < deadline:
+            try:
+                fr = self.page.get_frame(frame_locator)
+                ele = fr.ele(inner_locator, timeout=1.5)
+                if ele:
+                    got = ele.run_js('var r=this.getBoundingClientRect();'
+                                     'return [r.left, r.top, r.width, r.height];')
+                    return [float(v) for v in got]
+            except Exception as exc:
+                last = exc
+            time.sleep(0.3)
+        raise AssertionError('iframe 内元素 %s 在 8 秒内未就绪: %s' % (inner_locator, last))
 
     def center_of(self, locator):
         r = self.top_rect(locator)
@@ -285,6 +300,96 @@ class BrowserE2ETest(unittest.TestCase):
                 continue
             anchors = self.session.validate_specs([cand['value'][0]], [])['data']['items'][0]
             self.assertEqual(anchors['count'], 1, '相对定位的锚点必须唯一')
+
+    def test_26_multiline_text_uses_line_segment(self):
+        """被 <br> 拆成多行的文本，必须按单行片段生成文本候选。
+
+        真站实测（angular.dev 的 <h2> 里有 <br>）：
+        text=Productivity Meets scalability 与 tx=同一整串都匹配不到（count=0），
+        只有 tx=Productivity（单行）才能命中。这是文本定位在重前端页面可用的关键。
+        """
+        self.reset_page()
+        # 演示页没有 <br> 结构，这里临时造一个还原现场
+        self.page.run_js("""
+            var h = document.createElement('h2');
+            h.id = '__multiline_probe';
+            h.innerHTML = 'Productivity<br>Meets scalability';
+            h.style.cssText = 'position:fixed;top:200px;left:600px;z-index:9';
+            document.body.appendChild(h);
+        """)
+        time.sleep(0.3)
+        try:
+            r = self.top_rect('#__multiline_probe')
+            payload = workflow.pick_workflow(r[0] + r[2] / 2, r[1] + r[3] / 2)
+            self.assertTrue(payload['ok'], payload.get('error'))
+            cands = payload['desc'].get('cands') or []
+            text_locs = [c['loc'] for c in cands if c.get('k') == 'text']
+            self.assertTrue(
+                any(loc == 'tx=Productivity' for loc in text_locs),
+                '应生成单行文本候选 tx=Productivity，实际: %s' % text_locs)
+
+            # 整串跨行文本不应成为候选（它必然匹配不到，只会污染列表）
+            self.assertNotIn('tx=Productivity Meets scalability', text_locs)
+
+            # 单行候选必须真的能命中目标
+            res = self.session.validate_specs(['tx=Productivity'], [],
+                                              payload['desc']['rect'], payload['desc']['tag'])
+            item = res['data']['items'][0]
+            self.assertEqual(item['count'], 1)
+            self.assertIs(item['identity'], True, 'tx= 单行文本应精确命中目标元素')
+        finally:
+            self.page.run_js("var e=document.getElementById('__multiline_probe');"
+                             "if(e) e.remove();")
+
+    def test_27_navigation_is_not_blocked_by_slow_page(self):
+        """导航不得因页面加载慢而长时间阻塞（曾经阻塞 11 秒，画面完全冻结）。
+
+        这里用「导航到本地页 + 计时」验证基本量级；真实外网站在 stress_sites.py 里覆盖。
+        """
+        self.reset_page()
+        for _ in range(3):
+            t0 = time.perf_counter()
+            res = self.session.navigate(DEMO_URL)
+            dt = (time.perf_counter() - t0) * 1000
+            self.assertTrue(res.get('ok'), res.get('error'))
+            self.assertLess(dt, 5000, '导航耗时 %.0f ms，超过 5 秒说明又在等页面 load' % dt)
+
+    def test_28_frame_pump_never_freezes_after_navigation(self):
+        """导航前后画面都要持续出帧，不能因为导航把帧泵停掉。"""
+        import base64 as _b64
+
+        frames = []
+        lock = threading.Lock()
+
+        class _Sub(Subscriber):
+            def __init__(self):
+                super().__init__(None)
+
+            def push_frame(self, msg):
+                with lock:
+                    frames.append(msg)
+
+        sub = _Sub()
+        session.subscribe(sub)
+        try:
+            time.sleep(1.0)
+            self.session.navigate(DEMO_URL)
+            with lock:
+                n0 = len(frames)
+            t0 = time.perf_counter()
+            # 制造变化（滚动）
+            for _ in range(10):
+                self.session.page.run_cdp(
+                    'Input.dispatchMouseEvent', type='mouseWheel', x=400, y=400,
+                    deltaY=120, deltaX=0, button='none')
+                time.sleep(0.1)
+            time.sleep(1.0)
+            dt = time.perf_counter() - t0
+            with lock:
+                got = len(frames) - n0
+            self.assertGreater(got, 2, '导航后 %.1fs 内只收到 %d 帧，帧泵疑似被阻塞' % (dt, got))
+        finally:
+            session.unsubscribe(sub)
 
     # ------------------------------------------------------------ 高亮
 

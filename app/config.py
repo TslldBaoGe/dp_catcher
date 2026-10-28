@@ -27,6 +27,43 @@ def _data_root() -> Path:
 
 DATA_DIR = _data_root()
 SNAPSHOT_DIR = DATA_DIR / 'snapshots'
+SETTINGS_FILE = DATA_DIR / 'settings.json'
+
+
+def load_user_settings() -> dict:
+    """读取用户在界面里保存的设置（端口等）。文件缺失或损坏时按空配置处理。"""
+    import json
+    try:
+        data = json.loads(SETTINGS_FILE.read_text(encoding='utf-8'))
+        return data if isinstance(data, dict) else {}
+    except Exception:
+        return {}
+
+
+def save_user_settings(patch: dict) -> dict:
+    """把改动合并进 settings.json 并返回合并结果（None 值表示不修改）。"""
+    import json
+    current = load_user_settings()
+    current.update({k: v for k, v in patch.items() if v is not None})
+    try:
+        SETTINGS_FILE.parent.mkdir(parents=True, exist_ok=True)
+        SETTINGS_FILE.write_text(json.dumps(current, ensure_ascii=False, indent=2),
+                                 encoding='utf-8')
+    except Exception:
+        pass
+    return current
+
+
+# 启动时读一次；优先级：环境变量 > settings.json > 内置默认值
+_USER = load_user_settings()
+
+
+def _user_int(key: str):
+    try:
+        val = _USER.get(key)
+        return int(val) if val is not None else None
+    except (TypeError, ValueError):
+        return None
 
 
 def _env_str(name: str, default):
@@ -48,11 +85,12 @@ def _env_bool(name: str, default: bool) -> bool:
     return value.strip().lower() in ('1', 'true', 'yes', 'on')
 
 
-# 画质 / 帧率预设，影响镜像画面清晰度与 CPU 占用
+# 画质 / 帧率预设。screencast 模式下帧由浏览器主动推送，
+# max_fps 是前端节流上限；force_ms 是无变化时的兜底刷新间隔（Canvas/视频等）。
 STREAM_PRESETS = {
-    'smooth': {'label': '流畅', 'scale': 0.70, 'quality': 45, 'max_fps': 10, 'force_ms': 1800},
-    'standard': {'label': '标准', 'scale': 0.85, 'quality': 62, 'max_fps': 8, 'force_ms': 1300},
-    'hd': {'label': '高清', 'scale': 1.0, 'quality': 80, 'max_fps': 5, 'force_ms': 1000},
+    'smooth': {'label': '流畅', 'scale': 0.70, 'quality': 45, 'max_fps': 20, 'force_ms': 2000},
+    'standard': {'label': '标准', 'scale': 0.85, 'quality': 62, 'max_fps': 15, 'force_ms': 1500},
+    'hd': {'label': '高清', 'scale': 1.0, 'quality': 80, 'max_fps': 12, 'force_ms': 1200},
 }
 
 
@@ -62,10 +100,10 @@ class Settings:
     def __init__(self) -> None:
         # Web 服务
         self.host: str = _env_str('DPC_HOST', '127.0.0.1')
-        self.port: int = _env_int('DPC_PORT', 8777)
+        self.port: int = _env_int('DPC_PORT', _user_int('port') or 8777)
 
         # 浏览器
-        self.debug_port: int = _env_int('DPC_DEBUG_PORT', 9333)
+        self.debug_port: int = _env_int('DPC_DEBUG_PORT', _user_int('debug_port') or 9333)
         self.browser_path: str | None = _env_str('DPC_BROWSER_PATH', None)
         self.headless: bool = _env_bool('DPC_HEADLESS', False)
         self.window_width: int = _env_int('DPC_WIN_W', 1600)
@@ -74,7 +112,9 @@ class Settings:
         self.user_data_dir: str | None = _env_str('DPC_USER_DIR', None)
         self.auto_start: bool = _env_bool('DPC_AUTO_START', True)
         # eager = DOMContentLoaded 即返回，捕获场景更跟手
-        self.load_mode: str = _env_str('DPC_LOAD_MODE', 'eager')
+        # none：不等任何资源加载完，导航立刻返回。捕获场景只关心画面，
+        # 剩余渲染由帧泵持续推帧体现，避免外网站点把导航拖到十几秒。
+        self.load_mode: str = _env_str('DPC_LOAD_MODE', 'none')
         self.retry_times: int = _env_int('DPC_RETRY_TIMES', 3)
         self.retry_interval: float = float(_env_str('DPC_RETRY_INTERVAL', '0.15'))
         self.timeout: float = float(_env_str('DPC_TIMEOUT', '8'))
@@ -82,7 +122,8 @@ class Settings:
         # 镜像流
         self.stream_enabled: bool = _env_bool('DPC_STREAM', True)
         self.stream_preset: str = _env_str('DPC_STREAM_PRESET', 'standard')
-        self.poll_ms: int = _env_int('DPC_POLL_MS', 70)
+        # 帧泵轮询间隔：只影响「把待推帧转给前端」的延迟，screencast 帧本身由浏览器产生
+        self.poll_ms: int = _env_int('DPC_POLL_MS', 25)
 
         # 行为限制
         self.max_highlight: int = _env_int('DPC_MAX_HIGHLIGHT', 200)

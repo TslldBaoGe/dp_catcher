@@ -26,10 +26,25 @@ function copyTree(src, dst) {
 
 (async () => {
   fs.rmSync(stageDir, { recursive: true, force: true });
+  // 优先使用 node_modules 里已解压好的 Electron（离线可用），
+  // 避免 electron-builder 每次都去 GitHub 下载（内网/弱网时常 ETIMEDOUT）。
+  const localElectron = path.join(projectDir, 'node_modules', 'electron', 'dist');
+  const electronDist = fs.existsSync(path.join(localElectron, 'electron.exe'))
+    ? localElectron
+    : undefined;
+  if (electronDist) {
+    console.log('使用本地 Electron：' + electronDist);
+  } else {
+    console.log('未找到本地 Electron，将联网下载');
+  }
+
   await builder.build({
     dir: true,
     projectDir,
-    config: { directories: { output: stageDir } },
+    config: {
+      directories: { output: stageDir },
+      ...(electronDist ? { electronDist } : {}),
+    },
   });
 
   const built = path.join(stageDir, 'win-unpacked');

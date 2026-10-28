@@ -165,6 +165,8 @@ class ServerE2ETest(unittest.TestCase):
         self.assertIn('standard', cfg['presets'])
         self.assertIn('keys', cfg)
         self.assertIn('Enter', cfg['keys'])
+        self.assertIn('data_dir', cfg)
+        self.assertIn('snapshot_dir', cfg)
 
     def test_02_dashboard_page_served(self):
         html = http('/')
@@ -263,6 +265,32 @@ class ServerE2ETest(unittest.TestCase):
         self.assertTrue(res['error'])
         res2 = http('/api/action', {'action': 'click', 'spec': '#nope-not-here'})
         self.assertFalse(res2['ok'])
+
+    def test_17_usage_snippets_over_http(self):
+        http('/api/navigate', {'url': DEMO_URL})
+        rect = http('/api/highlight', {'spec': '#username'})['data']['groups'][0]['rects'][0]
+        http('/api/pick', {'x': rect[0] + rect[2] / 2, 'y': rect[1] + rect[3] / 2})
+        res = http('/api/usages', {'spec': '#username',
+                                   'opts': {'text': 'hello', 'attrName': 'placeholder'}})
+        self.assertTrue(res['ok'], res.get('error'))
+        ids = [u['id'] for u in res['usages']]
+        self.assertEqual(ids, ['wait', 'click', 'input', 'text', 'attr', 'assert',
+                               'scroll', 'screenshot', 'batch'])
+        self.assertIsNotNone(res['candidate'])
+        self.assertEqual(res['overall']['grade'], res['candidate']['grade'])
+        self.assertGreaterEqual(res['candidate']['stabilityScore'], 0)
+        self.assertLessEqual(res['candidate']['stabilityScore'], 100)
+        for item in res['usages']:
+            with self.subTest(usage=item['id']):
+                compile(item['code'], 'usage.py', 'exec')
+        inp = next(u for u in res['usages'] if u['id'] == 'input')
+        self.assertEqual(inp['action'], 'input')
+        self.assertIn("ele.input('hello')", inp['code'])
+
+    def test_18_desktop_shutdown_requires_token(self):
+        with self.assertRaises(urllib.error.HTTPError) as ctx:
+            http('/api/desktop/shutdown', {'token': 'wrong'})
+        self.assertEqual(ctx.exception.code, 403)
 
     def test_20_websocket_hello_frame_and_pick(self):
         try:

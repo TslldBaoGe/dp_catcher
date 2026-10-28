@@ -1,5 +1,5 @@
 /* DrissionPage 元素捕获器 · 控制台前端
- * 画面来源：后端 WebSocket 推送的 JPEG 帧（clip 截图，与 CSS 视口 1:1）
+ * 画面来源：后端 WebSocket 推送的整视口 JPEG 帧（设备像素，按 cw/ch 映射坐标）
  * 坐标映射：css = (鼠标 - 图像矩形) / 图像显示宽 * 帧视口宽
  */
 'use strict';
@@ -9,6 +9,9 @@ const S = {
   connected: false,
   running: false,
   frame: null,          // 最新帧元数据 {cw, ch, scale, url, title}
+  lastFrameAt: 0,       // 最近一次收到帧的时间（状态轮询抖动时避免遮罩闪一下）
+  paintSeq: 0,
+  ctx: null,
   pickMode: true,
   framePath: [],        // iframe 定位域
   desc: null,
@@ -18,6 +21,10 @@ const S = {
   codeTab: 'script',
   actions: [],
   history: [],
+  usages: [],
+  usageInfo: null,
+  usageOpts: {text: '', attrName: 'href'},
+  usageTimer: null,
   lastPickToken: 0,
   pendingPick: null,
   wheel: {dx: 0, dy: 0, timer: null},
@@ -81,18 +88,23 @@ const PY_KW = ['from', 'import', 'def', 'return', 'if', 'else', 'elif', 'for', '
   'True', 'False', 'print', 'raise', 'break', 'continue', 'pass', 'global', 'is'];
 
 function highlightPython(code) {
-  let out = esc(code);
-  out = out.replace(/(&quot;|")(?:[^"\\\n]|\\.)*\1/g, m => `\u0001${m}\u0001`);
-  out = out.replace(/('(?:[^'\\\n]|\\.)*')/g, m => `\u0001${m}\u0001`);
-  out = out.replace(/#[^\n]*/g, m => `\u0002${m}\u0002`);
-  out = out.replace(/\b(\d+\.?\d*)\b/g, '<span class="tok-num">$1</span>');
-  out = out.replace(new RegExp('\\b(' + PY_KW.join('|') + ')\\b', 'g'), '<span class="tok-kw">$1</span>');
-  out = out.replace(/\b([A-Za-z_]\w*)(\()/g, '<span class="tok-fn">$1</span>$2');
-  out = out.replace(/^(\s*)(@\w+)/gm, '$1<span class="tok-dec">$2</span>');
-  out = out.replace(/\u0001((?:&quot;|")[^\n]*?(?:&quot;|")|'[^'\n]*?')/g,
-    '<span class="tok-str">$1</span>');
-  out = out.replace(/\u0002(#[^\n]*)/g, '<span class="tok-com">$1</span>');
-  return out;
+  const kw = PY_KW.join('|');
+  const re = new RegExp(
+    '("(?:[^"\\\\\\n]|\\\\.)*"|\'(?:[^\'\\\\\\n]|\\\\.)*\')' +  // 字符串
+    '|(#[^\\n]*)' +                                            // 注释
+    '|\\b(\\d+\\.?\\d*)\\b' +                                  // 数字
+    '|\\b(' + kw + ')\\b' +                                    // 关键字
+    '|\\b([A-Za-z_]\\w*)(?=\\()' +                             // 函数名
+    '|^(\\s*)(@\\w+)', 'gm');                                  // 装饰器
+  return esc(code).replace(re, (m, str, com, num, word, fn, indent, dec) => {
+    if (str !== undefined) return '<span class="tok-str">' + str + '</span>';
+    if (com !== undefined) return '<span class="tok-com">' + com + '</span>';
+    if (num !== undefined) return '<span class="tok-num">' + num + '</span>';
+    if (word !== undefined) return '<span class="tok-kw">' + word + '</span>';
+    if (fn !== undefined) return '<span class="tok-fn">' + fn + '</span>';
+    if (dec !== undefined) return indent + '<span class="tok-dec">' + dec + '</span>';
+    return m;
+  });
 }
 
 /* ------------------------------------------------------------- WebSocket */
@@ -188,10 +200,11 @@ function send(obj) {
 /* ----------------------------------------------------------------- 画面 */
 
 function renderFrame(msg) {
-  const img = $('screen');
+  const same = !!S.frame && S.frame.cw === msg.cw && S.frame.data === msg.data;
   if (!S.frame || S.frame.cw !== msg.cw) { applyZoom(msg); }
-  img.src = 'data:image/jpeg;base64,' + msg.data;
   S.frame = msg;
+  S.lastFrameAt = Date.now();
+  if (!same) paintFrame(msg);  // 空闲保活帧内容不变时不重绘，省掉无谓的整层重传
   $('placeholder').hidden = true;
 
   S.fps.count++;
@@ -206,6 +219,24 @@ function renderFrame(msg) {
     (msg.title ? ` · ${msg.title}` : '');
 }
 
+/* 画布双缓冲：先解码再整体绘制，避免换帧瞬间露出元素背景色（白闪）。 */
+function paintFrame(msg) {
+  const seq = ++S.paintSeq;
+  const im = new Image();
+  im.src = 'data:image/jpeg;base64,' + msg.data;
+  im.decode().then(() => {
+    if (seq !== S.paintSeq) return;  // 过期帧直接丢弃，避免旧帧覆盖新帧
+    const canvas = $('screen');
+    if (!canvas) return;
+    if (canvas.width !== im.naturalWidth || canvas.height !== im.naturalHeight) {
+      canvas.width = im.naturalWidth;
+      canvas.height = im.naturalHeight;
+    }
+    const ctx = S.ctx || (S.ctx = canvas.getContext('2d', {alpha: false}));
+    ctx.drawImage(im, 0, 0, canvas.width, canvas.height);
+  }).catch(() => {});
+}
+
 /* 缩放：1 = 1 个页面 CSS 像素对应 1 个屏幕像素 */
 function applyZoom(frame) {
   const img = $('screen');
@@ -217,6 +248,7 @@ function applyZoom(frame) {
   } else {
     img.style.width = Math.round(f.cw * S.zoom) + 'px';
   }
+  img.style.aspectRatio = f.cw + ' / ' + f.ch;
   img.classList.add('zoomed');
   const shown = img.getBoundingClientRect().width || 1;
   $('zoomInfo').textContent = Math.round(shown / f.cw * 100) + '%';
@@ -376,6 +408,8 @@ function applyPick(payload) {
   renderCandidates();
   renderCode();
   renderRecorded();
+  renderUsages();
+  loadUsages();
   if (S.plan && S.plan.highlight) renderHighlight(S.plan.highlight);
   if (S.desc && S.desc.url) $('url').value = prettyUrl(S.desc.url);
   applyZoom();
@@ -400,6 +434,7 @@ function renderElement() {
   $('elTag').textContent = name;
 
   const best = (S.plan && S.plan.recommended) || null;
+  const overall = (S.plan && S.plan.overall) || null;
   const v = $('elVerdict');
   if (best) {
     v.textContent = best.verdictLabel + '（' + best.count + ' 个匹配）';
@@ -407,6 +442,20 @@ function renderElement() {
   } else {
     v.textContent = '无可用定位';
     v.className = 'badge danger';
+  }
+  const grade = $('elGrade');
+  if (overall) {
+    grade.hidden = false;
+    grade.textContent = overall.grade + ' · ' + overall.score;
+    grade.className = 'grade-chip grade-' + overall.grade;
+    grade.title = overall.gradeLabel + '：' + overall.gradeNote + '（点击查看用法与评分明细）';
+    grade.onclick = () => {
+      const tab = document.querySelector('.tab[data-tab="usage"]');
+      if (tab) tab.click();
+    };
+  } else {
+    grade.hidden = true;
+    grade.onclick = null;
   }
 
   const rows = [
@@ -416,14 +465,13 @@ function renderElement() {
     ['文本', d.text || '—'],
     ['value', d.value === '' ? '—' : d.value],
     ['位置', d.rect ? `${Math.round(d.rect[0])}, ${Math.round(d.rect[1])}  ${Math.round(d.rect[2])}×${Math.round(d.rect[3])}` : '—'],
+    ['稳定性', overall ? `${overall.grade}（${overall.score}/100）· ${overall.gradeLabel}` : '—'],
     ['可输入', d.editable ? '是' : '否'],
     ['所在域', (S.framePath.length ? S.framePath.join(' › ') : '主文档') + (d.inShadow ? ' · Shadow DOM' : '')],
     ['css_path', d.cssPath || '—'],
     ['xpath', d.xpath || '—'],
     ['页面', (d.title || '') + '  ' + (d.url || '')]
   ];
-  const st = d.states || {};
-  const on = Object.keys(STATE_LABEL).filter(k => st[k === 'is_displayed' ? 'displayed' : ''] !== undefined);
   $('elTable').innerHTML = rows.map(([k, val]) =>
     `<tr><td>${esc(k)}</td><td>${esc(val)}</td></tr>`).join('');
 
@@ -498,8 +546,14 @@ function renderCandidates() {
   const current = S.spec;
   list.innerHTML = plan.candidates.map((c, i) => {
     const active = sameSpec(c.value, current);
-    const val = Array.isArray(c.value) ? c.value.map(v => `'${v}'`).join(' → ') : c.value;
     const disp = Array.isArray(c.value) ? c.value.join('  ›  ') : c.value;
+    const grade = c.grade || 'D';
+    const score = c.stabilityScore != null ? c.stabilityScore : Math.round(c.stability || 0);
+    const factors = (c.factors || []).map(f => {
+      const delta = Number(f.delta || 0);
+      return `<span class="${delta > 0 ? 'plus' : (delta < 0 ? 'minus' : '')}">` +
+        `${esc(f.label)} ${delta > 0 ? '+' : ''}${delta}</span>`;
+    }).join('');
     return `<div class="cand ${c.level} ${active ? 'active' : ''}" data-idx="${i}">
       <div class="cand-top">
         <span class="cand-kind">${esc(kindLabel(c.kind))}</span>
@@ -508,13 +562,15 @@ function renderCandidates() {
       </div>
       <div class="cand-sub">
         <span>匹配 <b>${c.count < 0 ? '?' : c.count}</b></span>
+        <span class="grade-chip grade-${grade}" title="${esc(c.gradeNote || '')}">${grade} · ${score}</span>
+        <span class="scorebar"><i class="g-${grade}" style="width:${Math.max(0, Math.min(100, score))}%"></i></span>
         <span>${esc(c.why || '')}</span>
-        <span>稳定性 ${c.stability}</span>
         ${c.identity === true ? '<span style="color:var(--ok)">身份命中</span>' : ''}
         ${c.identity === false ? '<span style="color:var(--danger)">非目标元素</span>' : ''}
         ${c.geometry ? '<span style="color:var(--ok)">几何一致</span>' : ''}
         ${c.truncated ? '<span>（已截断显示）</span>' : ''}
       </div>
+      ${factors ? `<div class="cand-factors">${factors}</div>` : ''}
       ${c.error ? `<div class="cand-err">${esc(c.error)}</div>` : ''}
     </div>`;
   }).join('');
@@ -541,6 +597,118 @@ async function applySpec(spec) {
   const res = await api('/api/apply', {spec: spec, framePath: S.framePath});
   if (res && res.ok) { applyPick(res); toast('已切换定位表达式', 'ok'); }
   else if (res) toast(res.error || '校验失败', 'danger');
+}
+
+/* --------------------------------------------------------------- 用法面板 */
+
+function specLabel(spec) {
+  return Array.isArray(spec) ? spec.join('  ›  ') : String(spec || '');
+}
+
+async function copyText(text, okMsg) {
+  try {
+    await navigator.clipboard.writeText(text);
+    toast(okMsg || '已复制', 'ok');
+  } catch (e) {
+    toast('复制失败，请手动选择', 'warn');
+  }
+}
+
+async function loadUsages() {
+  if (!S.spec) {
+    S.usages = [];
+    S.usageInfo = null;
+    renderUsages();
+    return;
+  }
+  const res = await api('/api/usages', {
+    spec: S.spec,
+    framePath: S.framePath,
+    opts: {text: S.usageOpts.text, attrName: S.usageOpts.attrName}
+  });
+  if (res && res.ok) {
+    S.usages = res.usages || [];
+    S.usageInfo = res;
+  } else {
+    S.usages = [];
+    S.usageInfo = res || null;
+  }
+  renderUsages();
+}
+
+function renderUsages() {
+  const list = $('usageList');
+  const empty = $('usageEmpty');
+  const cand = S.usageInfo && S.usageInfo.candidate;
+  const overall = (S.plan && S.plan.overall) || null;
+  const info = cand || overall;
+  const grade = info && info.grade;
+  const score = info ? (info.stabilityScore != null ? info.stabilityScore : info.score) : null;
+  if (grade && score != null) {
+    $('usageGrade').textContent = grade;
+    $('usageGrade').className = 'uo-grade grade-' + grade;
+    $('usageTitle').textContent = specLabel(S.spec) || '当前元素';
+    const why = (cand && cand.why) || (overall && overall.why) || '';
+    const verdict = (cand && cand.verdictLabel) || (overall && overall.verdictLabel) || '';
+    $('usageSub').textContent = `${verdict ? verdict + ' · ' : ''}${grade} 级 · ${score}/100 · ${why}`;
+    $('usageBar').style.width = Math.max(0, Math.min(100, score)) + '%';
+    $('usageBar').className = 'g-' + grade;
+  } else {
+    $('usageGrade').textContent = '—';
+    $('usageGrade').className = 'uo-grade';
+    $('usageTitle').textContent = '捕获元素后显示稳定性评级';
+    $('usageSub').textContent = 'A / B / C / D 等级 + 0-100 分';
+    $('usageBar').style.width = '0%';
+  }
+  if (!S.usages.length) {
+    empty.hidden = false;
+    list.innerHTML = '';
+    return;
+  }
+  empty.hidden = true;
+  list.innerHTML = S.usages.map((u, i) => `
+    <div class="usage-card" data-idx="${i}">
+      <div class="usage-top">
+        <strong>${esc(u.label)}</strong>
+        <span class="muted">${esc(u.desc || '')}</span>
+        <div class="spacer"></div>
+        <button class="btn small ghost" data-role="copy">复制</button>
+        ${u.action ? '<button class="btn small" data-role="run">运行</button>' : ''}
+      </div>
+      <pre class="code usage-code">${highlightPython(u.code || '')}</pre>
+    </div>`).join('');
+
+  list.querySelectorAll('.usage-card').forEach(node => {
+    const u = S.usages[parseInt(node.dataset.idx, 10)];
+    node.querySelector('[data-role=copy]').onclick = () => copyText(u.code, '已复制「' + u.label + '」');
+    const run = node.querySelector('[data-role=run]');
+    if (run) run.onclick = () => runUsage(u);
+  });
+}
+
+async function runUsage(u) {
+  if (!S.spec || !u.action) return;
+  const res = await api('/api/action', {
+    action: u.action,
+    spec: S.spec,
+    framePath: S.framePath,
+    opts: u.opts || {}
+  });
+  const box = $('usageResult');
+  box.hidden = false;
+  box.innerHTML = highlightResult(res);
+  if (res && res.ok) {
+    toast('已执行：' + u.label, 'ok');
+    if (res.actions) { S.actions = res.actions; renderRecorded(); }
+    setTimeout(() => api('/api/refresh-element', {}).then(p => { if (p && p.ok) applyPick(p); }), 260);
+  } else {
+    toast((res && res.error) || '执行失败', 'danger');
+  }
+}
+
+function scheduleUsages() {
+  clearTimeout(S.usageTimer);
+  S.usageTimer = setTimeout(loadUsages, 300);
 }
 
 /* --------------------------------------------------------------- 代码面板 */
@@ -618,6 +786,7 @@ function renderHistory() {
     <div class="hist" data-id="${h.id}">
       <div class="hist-top">
         <span class="hist-name" data-role="rename" title="双击重命名">${esc(h.name)}</span>
+        ${h.grade ? `<span class="grade-chip grade-${h.grade}" title="${esc(h.gradeLabel || '')}">${h.grade}${h.stabilityScore != null ? ' · ' + h.stabilityScore : ''}</span>` : ''}
         <span class="badge ${h.verdict === 'unique' || h.verdict === 'ok' ? 'ok' : (h.verdict === 'multi' ? 'warn' : 'danger')}">${esc(h.verdict || '')}</span>
         <button class="btn small ghost" data-role="del">删除</button>
       </div>
@@ -626,6 +795,7 @@ function renderHistory() {
         <span>&lt;${esc(h.tag || '')}&gt;</span>
         <span>${esc(h.text || '')}</span>
         <span>匹配 ${h.count}</span>
+        ${h.stabilityScore != null ? `<span>稳定性 ${h.stabilityScore}/100</span>` : ''}
         ${h.framePath && h.framePath.length ? `<span>框架 ${esc(h.framePath.join(' › '))}</span>` : ''}
         <span>${(h.actions || []).length} 个动作</span>
       </div>
@@ -670,11 +840,13 @@ function setRunningFromStatus(status) {
   if (!status) return;
   S.running = !!status.running;
   $('browserBtn').textContent = S.running ? '关闭浏览器' : '启动浏览器';
-  $('placeholder').hidden = S.running && !!S.frame;
-  if (!S.running) {
+  // is_alive() 在导航/CDP 抖动时可能瞬间为 false；只要帧还在持续到达，就不要盖遮罩
+  const live = !!S.frame && (Date.now() - (S.lastFrameAt || 0) < 2500);
+  $('placeholder').hidden = live || (S.running && !!S.frame);
+  if (!S.running && !live) {
     $('phText').textContent = '浏览器未启动，或最近一次连接已断开。';
     $('placeholder').hidden = false;
-  } else {
+  } else if (S.running) {
     setStatus('on', '浏览器运行中');
     const u = (status.metrics || {}).u;
     if (u && !$('url').value) $('url').value = prettyUrl(u);
@@ -758,6 +930,15 @@ function bindUI() {
     send({cmd: 'preset', name: e.target.value});
     api('/api/browser/preset', {name: e.target.value});
   };
+
+  $('usageText').addEventListener('input', (e) => {
+    S.usageOpts.text = e.target.value;
+    scheduleUsages();
+  });
+  $('usageAttr').addEventListener('input', (e) => {
+    S.usageOpts.attrName = e.target.value.trim() || 'href';
+    scheduleUsages();
+  });
 
   $('clearHlBtn').onclick = async () => {
     $('overlay').innerHTML = '';
@@ -862,8 +1043,11 @@ function afterNav(res) {
   if (res && !res.ok) { toast(res.error || '导航失败', 'danger'); return; }
   if (res && res.data && res.data.url) $('url').value = prettyUrl(res.data.url);
   S.desc = null; S.plan = null; S.spec = null; S.code = null;
+  S.usages = []; S.usageInfo = null;
   $('overlay').innerHTML = '';
-  renderElement(); renderCandidates(); renderCode();
+  $('usageResult').hidden = true;
+  $('usageResult').innerHTML = '';
+  renderElement(); renderCandidates(); renderCode(); renderUsages();
 }
 
 /* ------------------------------------------------------------------ 启动 */

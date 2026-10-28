@@ -141,11 +141,12 @@ class BrowserE2ETest(unittest.TestCase):
         self.assertGreater(len(raw), 2000)
         size = jpeg_size(raw)
         self.assertIsNotNone(size, '返回的数据不是合法 JPEG')
-        preset = settings.preset
-        # 出图尺寸 = 视口 × 预设倍率（内部已把 devicePixelRatio 归一掉）
-        self.assertAlmostEqual(size[0], info['iw'] * preset['scale'], delta=3,
-                               msg='图像宽度应与视口宽 × 预设倍率一致')
-        self.assertAlmostEqual(size[1], info['ih'] * preset['scale'], delta=3, msg='图像高度不符')
+        # 出图是整视口设备像素截图：不能用 clip.scale 缩放，
+        # 否则 headed Chrome 会把缩放后的抓图表面短暂贴到窗口上（肉眼闪烁）。
+        dpr = max(1.0, float(info.get('dpr') or 1.0))
+        self.assertAlmostEqual(size[0], info['iw'] * dpr, delta=3,
+                               msg='图像宽度应为 CSS 视口宽 × devicePixelRatio')
+        self.assertAlmostEqual(size[1], info['ih'] * dpr, delta=3, msg='图像高度不符')
         self.assertAlmostEqual(frame['cw'], info['iw'], delta=0.5,
                                msg='帧必须带上 CSS 视口宽度，前端据此换算点击坐标')
 
@@ -613,10 +614,11 @@ class BrowserE2ETest(unittest.TestCase):
         self.assertGreater(info['sy'], 100)
         frame = self.session._grab_frame(info, time.perf_counter())
         self.assertIsNotNone(frame)
-        # 帧元数据里的滚动位置就是截图起点，前端据此换算点击坐标
+        # 帧元数据里的滚动位置供前端参考；整视口截图不再用 clip 起点
         self.assertAlmostEqual(frame['sy'], info['sy'], delta=1)
         size = jpeg_size(base64.b64decode(frame['data']))
-        self.assertAlmostEqual(size[0], info['iw'] * settings.preset['scale'], delta=3)
+        dpr = max(1.0, float(info.get('dpr') or 1.0))
+        self.assertAlmostEqual(size[0], info['iw'] * dpr, delta=3)
 
 
 if __name__ == '__main__':

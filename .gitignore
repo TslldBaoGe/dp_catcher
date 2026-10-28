@@ -8,6 +8,11 @@ __pycache__/
 snapshots/
 *.log
 
+# 桌面客户端依赖与构建产物
+node_modules/
+build/
+dist_client/
+
 # 编辑器 / 系统
 .vscode/
 .idea/

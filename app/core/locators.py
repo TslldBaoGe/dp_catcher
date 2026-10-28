@@ -8,6 +8,7 @@
 """
 from __future__ import annotations
 
+import re
 from typing import Optional
 
 from ..config import settings
@@ -34,12 +35,160 @@ VERDICT_META = {
     'invalid': {'label': '语法错误', 'level': 'danger', 'note': 'DrissionPage 无法解析该表达式'},
 }
 
+GRADE_META = {
+    'A': {'label': '稳定', 'level': 'ok', 'note': '定位可靠，适合长期使用'},
+    'B': {'label': '较稳', 'level': 'ok', 'note': '可用，页面改版时需要留意'},
+    'C': {'label': '一般', 'level': 'warn', 'note': '建议换用更稳的定位写法'},
+    'D': {'label': '不稳', 'level': 'danger', 'note': '不建议在生产脚本里依赖'},
+}
+
+_DYNAMIC_STRONG = (
+    re.compile(r'^[0-9a-fA-F]{8}-[0-9a-fA-F]{4}-[0-9a-fA-F]{4}-[0-9a-fA-F]{4}-[0-9a-fA-F]{12}$'),
+    re.compile(r'^[0-9a-fA-F]{16,}$'),
+    re.compile(r'.*\d{10,}.*'),
+)
+_DYNAMIC_WEAK = (
+    re.compile(r'^\d{3,}$'),
+    re.compile(r'^(ember|react|vue|radix|headlessui|mui|el|ext)-?\d+$', re.I),
+)
+_CSS_IN_JS = re.compile(r'^(css|sc|jsx|emotion|styled)-[a-z0-9]{4,}$', re.I)
+
 
 def _num(v, default=0.0) -> float:
     try:
         return float(v)
     except (TypeError, ValueError):
         return default
+
+
+def _spec_text(value) -> str:
+    if isinstance(value, (list, tuple)):
+        return ' >> '.join(str(v) for v in value)
+    return str(value or '')
+
+
+def _grade_of(score: float) -> str:
+    if score >= 85:
+        return 'A'
+    if score >= 70:
+        return 'B'
+    if score >= 50:
+        return 'C'
+    return 'D'
+
+
+def _structure_penalty(kind: str, value) -> float:
+    """结构越深、层级下标越多，越容易随页面改版失效。"""
+    text = _spec_text(value)
+    if kind == 'xpath':
+        depth = text.count('/')
+        nth = text.count('[')
+        return min(25.0, max(0.0, (depth - 2) * 1.5) + nth * 2.0)
+    if kind == 'css':
+        depth = text.count('>')
+        nth = text.count(':nth-of-type')
+        return min(25.0, depth * 3.0 + nth * 4.0)
+    if kind == 'relative' and isinstance(value, (list, tuple)) and len(value) > 2:
+        return min(12.0, (len(value) - 2) * 4.0)
+    return 0.0
+
+
+def _dynamic_penalty(kind: str, value) -> tuple[float, str]:
+    """识别 UUID / 哈希 / 时间戳 / 自增数字 / CSS-in-JS 类名等易变值。"""
+    if kind not in ('id', 'attr', 'tagattr', 'class'):
+        return 0.0, ''
+    text = _spec_text(value)
+    for token in re.split(r'[=\s]+', text):
+        token = token.strip('"\'#.@')
+        if not token or token in ('tag', 'class'):
+            continue
+        if _CSS_IN_JS.match(token):
+            return 8.0, '类名像 CSS-in-JS 自动生成'
+        if any(p.match(token) for p in _DYNAMIC_STRONG):
+            return 12.0, '属性值像 UUID / 哈希 / 时间戳'
+        if any(p.match(token) for p in _DYNAMIC_WEAK):
+            return 6.0, '属性值像自增数字或框架生成 id'
+    if kind in ('class', 'tagattr'):
+        cls_part = text.split('class=', 1)[-1] if 'class=' in text else text
+        if len(cls_part.split()) > 3:
+            return 5.0, 'class 组合过多，易随样式变化'
+    return 0.0, ''
+
+
+def _stability_of(cand: dict, item: dict, kind: str, value, verdict: str) -> dict:
+    """把「定位类型 + 校验结论 + 结构/动态特征」折算成 0-100 的稳定性分。"""
+    base = max(KIND_STABILITY.get(kind, 50), _num(cand.get('st'), 0))
+    base = min(base, 100.0)
+    score = base
+    cap = 100.0
+    factors = [{'label': '类型基础分（%s）' % _kind_why(kind), 'delta': round(base, 1)}]
+
+    penalty = _structure_penalty(kind, value)
+    if penalty:
+        score -= penalty
+        if penalty >= 12:
+            cap = min(cap, 79.0)
+        factors.append({'label': '结构路径较深', 'delta': -round(penalty, 1)})
+
+    penalty, label = _dynamic_penalty(kind, value)
+    if penalty:
+        score -= penalty
+        if label == '类名像 CSS-in-JS 自动生成':
+            cap = min(cap, 69.0)
+        elif label == '属性值像 UUID / 哈希 / 时间戳':
+            cap = min(cap, 79.0)
+        elif label == '属性值像自增数字或框架生成 id':
+            cap = min(cap, 84.0)
+        factors.append({'label': label, 'delta': -round(penalty, 1)})
+
+    if verdict in ('unique', 'ok'):
+        score += 6
+        factors.append({'label': '唯一命中目标', 'delta': 6})
+    elif verdict == 'multi':
+        score -= 12
+        factors.append({'label': '匹配多个元素', 'delta': -12})
+    elif verdict == 'wrong':
+        score = min(score, 20.0)
+        factors.append({'label': '首个匹配不是目标（错位）', 'delta': 0})
+    elif verdict in ('none', 'invalid'):
+        score = 0.0
+        factors.append({'label': '未匹配或语法错误', 'delta': 0})
+
+    if item.get('identity') is None and verdict in ('unique', 'ok'):
+        score -= 6
+        factors.append({'label': '无法做身份比对', 'delta': -6})
+    if cand.get('jsCount') == 1 and cand.get('jsHits'):
+        score += 3
+        factors.append({'label': '页内初判唯一命中', 'delta': 3})
+
+    score = max(0.0, min(100.0, min(score, cap)))
+    grade = _grade_of(score)
+    return {
+        'stabilityScore': int(round(score)),
+        'grade': grade,
+        'gradeLabel': GRADE_META[grade]['label'],
+        'gradeLevel': GRADE_META[grade]['level'],
+        'gradeNote': GRADE_META[grade]['note'],
+        'factors': factors,
+    }
+
+
+def _overall(best: Optional[dict]) -> Optional[dict]:
+    if not best:
+        return None
+    return {
+        'grade': best['grade'],
+        'gradeLabel': best['gradeLabel'],
+        'gradeLevel': best['gradeLevel'],
+        'gradeNote': best['gradeNote'],
+        'score': best['stabilityScore'],
+        'verdict': best['verdict'],
+        'verdictLabel': best['verdictLabel'],
+        'kind': best['kind'],
+        'count': best['count'],
+        'value': best['value'],
+        'why': best['why'],
+    }
 
 
 def build_locator_plan(session, desc: dict, frame_path: Optional[list] = None,
@@ -118,6 +267,7 @@ def build_locator_plan(session, desc: dict, frame_path: Optional[list] = None,
         'ok': True,
         'candidates': checked,
         'recommended': best,
+        'overall': _overall(best),
         'viewport': (result.get('data') or {}).get('viewport'),
         'target': {
             'tag': target_tag, 'rect': target_rect,
@@ -190,6 +340,7 @@ def _score(cand: dict, item: dict) -> dict:
         'firstRect': item.get('first_rect'),
         'error': error,
         'truncated': bool(item.get('truncated')),
+        **_stability_of(cand, item, kind, value, verdict),
     }
 
 

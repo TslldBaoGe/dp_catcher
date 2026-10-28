@@ -108,8 +108,8 @@ def main() -> int:
             print('    -', e)
 
         got_frame = viewer.run_js(
-            "var s=document.getElementById('screen');"
-            "return !!(s && s.src && s.src.indexOf('data:image/jpeg') === 0);")
+            "return !!(typeof S !== 'undefined' && S.frame && "
+            "document.getElementById('screen').width > 2);")
         print('[%s] 镜像帧已到达' % ('OK' if got_frame else 'FAIL'))
 
         status_txt = viewer.run_js("return document.getElementById('statusText').textContent;")

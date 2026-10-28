@@ -1,0 +1,70 @@
+<!DOCTYPE html>
+<html lang="zh-CN">
+<head>
+<meta charset="utf-8">
+<meta http-equiv="Content-Security-Policy" content="default-src 'none'; style-src 'unsafe-inline'; script-src 'unsafe-inline'">
+<title>启动失败</title>
+<style>
+  * { box-sizing: border-box; }
+  html, body { margin: 0; height: 100%; }
+  body {
+    display: flex; align-items: center; justify-content: center;
+    background: radial-gradient(120% 140% at 15% 0%, #2a1a2e 0%, #141a2c 55%, #0a1020 100%);
+    color: #e6edf8; font: 13px/1.55 "Segoe UI", "Microsoft YaHei", system-ui, sans-serif;
+    -webkit-app-region: drag; user-select: none;
+  }
+  .box { width: 100%; padding: 26px 32px; }
+  .top { display: flex; align-items: center; gap: 12px; margin-bottom: 12px; }
+  .mark {
+    width: 40px; height: 40px; border-radius: 50%; flex: none;
+    display: grid; place-items: center; font: 800 20px/1 Consolas, monospace;
+    color: #ef4444; border: 2px solid #ef4444; background: rgba(239, 68, 68, .12);
+  }
+  h1 { margin: 0; font-size: 16px; }
+  .sub { color: #8b9ac0; font-size: 12px; margin: 0 0 12px; }
+  pre {
+    margin: 0 0 16px; padding: 11px 13px; max-height: 170px; overflow: auto;
+    background: #0a1120; border: 1px solid #263352; border-radius: 8px;
+    font: 11.5px/1.6 Consolas, monospace; color: #ffc7c7; white-space: pre-wrap; word-break: break-all;
+    user-select: text; -webkit-app-region: no-drag;
+  }
+  .acts { display: flex; gap: 9px; -webkit-app-region: no-drag; }
+  button {
+    padding: 7px 14px; border-radius: 6px; cursor: pointer;
+    border: 1px solid #263352; background: #1b2540; color: #e6edf8; font: inherit;
+  }
+  button:hover { background: #22304f; }
+  button.primary { background: #3b82f6; border-color: #3b82f6; color: #fff; font-weight: 600; }
+  button.primary:hover { background: #2f74e0; }
+  button.ghost { background: transparent; }
+</style>
+</head>
+<body>
+  <div class="box">
+    <div class="top">
+      <div class="mark">!</div>
+      <div>
+        <h1>无法启动本地服务</h1>
+        <p class="sub">请查看日志排查，或点击重试</p>
+      </div>
+    </div>
+    <pre id="msg">未知错误</pre>
+    <div class="acts">
+      <button class="primary" id="retry">重试</button>
+      <button id="logs">打开日志目录</button>
+      <button class="ghost" id="close">退出</button>
+    </div>
+  </div>
+<script>
+  const params = new URLSearchParams(location.search);
+  const msg = params.get('message') || '未知错误';
+  document.getElementById('msg').textContent = msg;
+  const api = window.desktop || {};
+  const retry = document.getElementById('retry');
+  retry.disabled = !api.retry;
+  retry.onclick = () => api.retry && api.retry();
+  document.getElementById('logs').onclick = () => api.openLogs && api.openLogs();
+  document.getElementById('close').onclick = () => window.close();
+</script>
+</body>
+</html>

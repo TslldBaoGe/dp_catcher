@@ -2,7 +2,9 @@
 from __future__ import annotations
 
 import asyncio
+import hmac
 import logging
+import os
 from contextlib import asynccontextmanager
 
 from fastapi import Body, FastAPI, WebSocket, WebSocketDisconnect
@@ -34,13 +36,22 @@ async def lifespan(app: FastAPI):
         pass
 
 
-app = FastAPI(title='DrissionPage 元素捕获器', version='1.0.0', lifespan=lifespan)
+app = FastAPI(title='DrissionPage 元素捕获器', version='1.1.0', lifespan=lifespan)
 app.mount('/static', StaticFiles(directory=str(STATIC_DIR)), name='static')
 
 
 async def _call(fn, *args, **kwargs):
     """所有 DrissionPage 调用都是阻塞的 → 丢到线程池，避免卡住事件循环。"""
     return await asyncio.to_thread(fn, *args, **kwargs)
+
+
+_shutdown_hook = None
+
+
+def set_shutdown_hook(fn) -> None:
+    """桌面壳启动时注入：收到关停请求后让 uvicorn 优雅退出。"""
+    global _shutdown_hook
+    _shutdown_hook = fn
 
 
 def _resp(payload: dict):
@@ -84,15 +95,10 @@ async def get_status():
 
 @app.get('/api/frames')
 async def get_frames():
-    res = await _call(session.page_data, 'url')
-    frames = []
-    try:
-        res2 = await _call(session.status)
-        frames = (res2 or {}).get('frames') or []
-    except Exception:
-        pass
-    return {'ok': True, 'url': (res.get('data') or {}).get('url') if res.get('ok') else None,
-            'frames': frames}
+    res = await _call(session.frames)
+    data = (res.get('data') or {}) if res.get('ok') else {}
+    return {'ok': bool(res.get('ok')), 'url': data.get('url'),
+            'frames': data.get('frames') or [], 'error': res.get('error')}
 
 
 # ------------------------------------------------------------------- 浏览器
@@ -105,6 +111,26 @@ async def browser_start(payload: dict = Body(default={})):
 @app.post('/api/browser/stop')
 async def browser_stop():
     return _resp(await _call(session.stop))
+
+
+@app.post('/api/desktop/shutdown')
+async def desktop_shutdown(payload: dict = Body(default={})):
+    """仅桌面壳可调用：校验一次性令牌后关停浏览器与后端进程。"""
+    expected = os.environ.get('DPC_DESKTOP_TOKEN') or ''
+    if not expected:
+        return JSONResponse(status_code=403,
+                            content={'ok': False, 'error': '仅桌面模式可用'})
+    token = str(payload.get('token') or '')
+    if not hmac.compare_digest(token, expected):
+        return JSONResponse(status_code=403,
+                            content={'ok': False, 'error': '桌面令牌无效'})
+    try:
+        session.stop_pump()
+        await asyncio.to_thread(session.stop, True)
+    finally:
+        if _shutdown_hook is not None:
+            _shutdown_hook()
+    return {'ok': True}
 
 
 @app.post('/api/browser/restart')
@@ -221,6 +247,13 @@ async def describe():
 async def apply_spec(payload: dict = Body(default={})):
     return _resp(await _call(workflow.apply_workflow, payload.get('spec'),
                             payload.get('framePath')))
+
+
+@app.post('/api/usages')
+async def usages(payload: dict = Body(default={})):
+    """当前定位表达式 → 常用 DrissionPage 使用片段。"""
+    return _resp(await _call(workflow.usage_workflow, payload.get('spec'),
+                            payload.get('framePath'), payload.get('opts') or {}))
 
 
 @app.post('/api/refresh-element')
@@ -342,7 +375,7 @@ async def websocket_endpoint(ws: WebSocket):
 
     sender_task = asyncio.create_task(sender())
     try:
-        await send({'type': 'hello', 'status': session.status()})
+        await send({'type': 'hello', 'status': await asyncio.to_thread(session.status)})
         while True:
             msg = await ws.receive_json()
             cmd = msg.get('cmd')

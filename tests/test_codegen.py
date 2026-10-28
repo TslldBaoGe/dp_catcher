@@ -129,6 +129,67 @@ class TestFullScript(unittest.TestCase):
         self.assertIn('已跳过', script)
 
 
+class TestUsageSnippets(unittest.TestCase):
+
+    def _ids(self, items):
+        return [item['id'] for item in items]
+
+    def test_all_common_usages_present(self):
+        items = codegen.usage_snippets('#username')
+        self.assertEqual(self._ids(items),
+                         ['wait', 'click', 'input', 'text', 'attr', 'assert',
+                          'scroll', 'screenshot', 'batch'])
+
+    def test_codes_are_valid_python(self):
+        items = codegen.usage_snippets(['@data-uid=1002', 'tag:td@@class=name'],
+                                       text="a'b")
+        for item in items:
+            with self.subTest(id=item['id']):
+                compile(item['code'], 'usage.py', 'exec')
+
+    def test_frame_and_shadow_scope_in_usage(self):
+        items = codegen.usage_snippets('#btn', frame_path=['#innerFrame'])
+        click = next(i for i in items if i['id'] == 'click')
+        self.assertIn("page.get_frame('#innerFrame').ele('#btn')", click['code'])
+
+        shadow = codegen.usage_snippets('#shadowBtn',
+                                        shadow_chain=[{'selector': '#host', 'id': 'host'}])
+        click = next(i for i in shadow if i['id'] == 'click')
+        self.assertIn("('#host').shadow_root.ele('#shadowBtn')", click['code'])
+
+    def test_input_action_only_when_text_given(self):
+        empty = next(i for i in codegen.usage_snippets('#x') if i['id'] == 'input')
+        self.assertIsNone(empty['action'])
+        self.assertIn("ele.input('要输入的文本')", empty['code'])
+
+        filled = next(i for i in codegen.usage_snippets('#x', text='hello')
+                      if i['id'] == 'input')
+        self.assertEqual(filled['action'], 'input')
+        self.assertEqual(filled['opts']['text'], 'hello')
+        self.assertIn("ele.input('hello')", filled['code'])
+
+    def test_attr_name_is_used(self):
+        items = codegen.usage_snippets('#x', attr_name='data-id')
+        attr = next(i for i in items if i['id'] == 'attr')
+        self.assertIn("ele.attr('data-id')", attr['code'])
+        self.assertEqual(attr['opts']['name'], 'data-id')
+
+    def test_batch_uses_eles(self):
+        items = codegen.usage_snippets(['#row', '@name=cell'])
+        batch = next(i for i in items if i['id'] == 'batch')
+        self.assertIn("eles = page.ele('#row').eles('@name=cell')", batch['code'])
+
+    def test_runnable_actions_are_known_browser_actions(self):
+        known = {'click', 'input', 'get_text', 'get_attr', 'scroll_to', 'get_screenshot'}
+        for item in codegen.usage_snippets('#x', text='y'):
+            if item['action']:
+                with self.subTest(id=item['id']):
+                    self.assertIn(item['action'], known)
+
+    def test_none_spec_returns_empty(self):
+        self.assertEqual(codegen.usage_snippets(None), [])
+
+
 class TestReportSnippet(unittest.TestCase):
 
     def test_report_lists_attrs(self):

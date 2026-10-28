@@ -2,13 +2,31 @@
 from __future__ import annotations
 
 import os
+import sys
 from pathlib import Path
 
 APP_DIR = Path(__file__).resolve().parent
+FROZEN = bool(getattr(sys, 'frozen', False))
+# PyInstaller 解包目录；源码运行时就是项目根目录
+RESOURCE_ROOT = Path(getattr(sys, '_MEIPASS', APP_DIR.parent))
 PROJECT_DIR = APP_DIR.parent
-STATIC_DIR = APP_DIR / 'static'
-DEMO_PAGE = PROJECT_DIR / 'demo' / 'demo_page.html'
-SNAPSHOT_DIR = PROJECT_DIR / 'snapshots'
+STATIC_DIR = RESOURCE_ROOT / 'app' / 'static'
+DEMO_PAGE = RESOURCE_ROOT / 'demo' / 'demo_page.html'
+
+
+def _data_root() -> Path:
+    """可写数据目录：桌面版放到用户目录，避免 Program Files 只读。"""
+    env = os.environ.get('DPC_DATA_DIR')
+    if env:
+        return Path(env)
+    if FROZEN:
+        base = os.environ.get('LOCALAPPDATA') or str(Path.home() / 'AppData' / 'Local')
+        return Path(base) / 'DrissionPageCatcher'
+    return APP_DIR.parent
+
+
+DATA_DIR = _data_root()
+SNAPSHOT_DIR = DATA_DIR / 'snapshots'
 
 
 def _env_str(name: str, default):
@@ -103,6 +121,9 @@ class Settings:
             'max_highlight': self.max_highlight,
             'snapshot_dir': str(SNAPSHOT_DIR),
             'demo_page': str(DEMO_PAGE),
+            'data_dir': str(DATA_DIR),
+            'desktop': bool(os.environ.get('DPC_DESKTOP')),
+            'frozen': FROZEN,
         }
 
 

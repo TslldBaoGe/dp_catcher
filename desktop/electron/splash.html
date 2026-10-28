@@ -1,0 +1,51 @@
+<!DOCTYPE html>
+<html lang="zh-CN">
+<head>
+<meta charset="utf-8">
+<meta http-equiv="Content-Security-Policy" content="default-src 'none'; style-src 'unsafe-inline'">
+<title>DrissionPage 元素捕获器</title>
+<style>
+  * { box-sizing: border-box; }
+  html, body { margin: 0; height: 100%; }
+  body {
+    display: flex; align-items: center; justify-content: center;
+    background: radial-gradient(120% 140% at 15% 0%, #1b2b4d 0%, #0f172a 55%, #0a1020 100%);
+    color: #e6edf8; font: 13px/1.5 "Segoe UI", "Microsoft YaHei", system-ui, sans-serif;
+    -webkit-app-region: drag; user-select: none; overflow: hidden;
+  }
+  .card { width: 100%; padding: 30px 38px; text-align: center; }
+  .logo {
+    width: 62px; height: 62px; margin: 0 auto 16px; border-radius: 16px;
+    display: grid; place-items: center;
+    background: linear-gradient(135deg, #3b82f6, #22d3ee);
+    color: #04121f; font: 800 22px/1 Consolas, monospace; letter-spacing: .5px;
+    box-shadow: 0 12px 34px rgba(34, 211, 238, .28);
+  }
+  h1 { margin: 0 0 6px; font-size: 17px; font-weight: 650; }
+  p { margin: 0 0 18px; color: #8b9ac0; font-size: 12.5px; }
+  .bar {
+    height: 3px; width: 220px; margin: 0 auto 16px;
+    background: rgba(38, 51, 82, .9); border-radius: 2px; overflow: hidden;
+  }
+  .bar i {
+    display: block; width: 40%; height: 100%; border-radius: 2px;
+    background: linear-gradient(90deg, #3b82f6, #22d3ee);
+    animation: slide 1.3s ease-in-out infinite;
+  }
+  @keyframes slide {
+    0% { transform: translateX(-110%); }
+    100% { transform: translateX(280%); }
+  }
+  small { color: #5f6f92; font-size: 11px; }
+</style>
+</head>
+<body>
+  <div class="card">
+    <div class="logo">DP</div>
+    <h1>DrissionPage 元素捕获器</h1>
+    <p>正在启动本地服务与浏览器…</p>
+    <div class="bar"><i></i></div>
+    <small>首次启动需要初始化调试端口，请稍候</small>
+  </div>
+</body>
+</html>

@@ -53,7 +53,7 @@
 <main class="layout">
   <section class="stage">
     <div class="viewport" id="viewport">
-      <img id="screen" alt="实时画面" draggable="false">
+      <canvas id="screen" aria-label="实时画面"></canvas>
       <div class="overlay" id="overlay"></div>
       <div class="hoverbox" id="hoverbox" hidden></div>
       <div class="placeholder" id="placeholder">
@@ -82,7 +82,8 @@
     <nav class="tabs">
       <button class="tab active" data-tab="element">元素</button>
       <button class="tab" data-tab="locator">定位</button>
-      <button class="tab" data-tab="code">Python 代码</button>
+      <button class="tab" data-tab="usage">用法</button>
+      <button class="tab" data-tab="code">代码</button>
       <button class="tab" data-tab="test">测试</button>
       <button class="tab" data-tab="history">捕获列表 <b id="histCount">0</b></button>
     </nav>
@@ -94,6 +95,7 @@
         <div class="element-head">
           <code id="elTag" class="el-tag">-</code>
           <span class="badge" id="elVerdict"></span>
+          <span class="grade-chip" id="elGrade" hidden></span>
           <div class="spacer"></div>
           <button class="btn small" id="parentBtn" title="选取父元素">选父级</button>
           <button class="btn small" id="intoFrameBtn" hidden>进入框架</button>
@@ -122,6 +124,29 @@
       <div class="tip" id="locatorTip">
         推荐优先使用「唯一 id / data-* 属性 / 相对定位」；文本定位随文案变化、结构路径随页面改版失效，稳定性较低。
       </div>
+    </div>
+
+    <!-- 元素用法 -->
+    <div class="tabpane" id="pane-usage">
+      <div class="usage-overall" id="usageOverall">
+        <div class="uo-grade" id="usageGrade">—</div>
+        <div class="uo-body">
+          <div class="uo-title" id="usageTitle">捕获元素后显示稳定性评级</div>
+          <div class="uo-sub" id="usageSub">A / B / C / D 等级 + 0-100 分</div>
+          <div class="scorebar big"><i id="usageBar" style="width:0%"></i></div>
+        </div>
+      </div>
+      <div class="usage-config">
+        <label class="field">输入文本
+          <input type="text" id="usageText" placeholder="要输入的文本">
+        </label>
+        <label class="field">属性名
+          <input type="text" id="usageAttr" value="href" placeholder="href">
+        </label>
+      </div>
+      <div class="empty" id="usageEmpty">捕获元素后，这里会列出等待、点击、输入、读取、断言等常用写法</div>
+      <div class="usage-list" id="usageList"></div>
+      <pre class="code result" id="usageResult" hidden></pre>
     </div>
 
     <!-- 代码 -->

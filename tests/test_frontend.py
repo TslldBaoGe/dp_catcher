@@ -89,6 +89,23 @@ class TestWebSocketCommands(unittest.TestCase):
         self.assertTrue(not unhandled, '前端没有处理这些推送类型: %s' % unhandled)
 
 
+class TestCodeHighlight(unittest.TestCase):
+
+    def test_highlighter_has_no_control_char_markers(self):
+        """高亮占位符若残留，会在代码块里显示成不可见控制字符。"""
+        start = APP_JS.index('function highlightPython(')
+        end = APP_JS.index('/* ------------------------------------------------------------- WebSocket')
+        snippet = APP_JS[start:end]
+        self.assertNotIn('\u0001', snippet)
+        self.assertNotIn('\u0002', snippet)
+
+    def test_highlighter_escapes_html(self):
+        start = APP_JS.index('function highlightPython(')
+        end = APP_JS.index('/* ------------------------------------------------------------- WebSocket')
+        self.assertIn('esc(code)', APP_JS[start:end],
+                      '高亮前必须先转义 HTML，避免代码内容注入页面')
+
+
 class TestPickerScript(unittest.TestCase):
 
     def test_picker_guards_against_double_injection(self):

@@ -113,6 +113,8 @@ class BrowserSession:
         self._started_at: Optional[float] = None
         self._last_error: Optional[str] = None
         self._inject_fail = 0
+        # 只有浏览器是本工具启动的，退出时才允许 quit()，避免误关用户自己的 Chrome
+        self._owns_browser = False
 
         self._subs: list[Subscriber] = []
         self._subs_lock = threading.Lock()
@@ -121,6 +123,7 @@ class BrowserSession:
         self._stopping = threading.Event()
         self._dirty = 0
         self._busy = False  # 有长操作进行中（如导航），暂停抓帧
+        self._last_info: dict = {}  # 帧泵顺带缓存的最新页面信息，供 status 只读使用
 
         # 统计
         self.stats = {'frames': 0, 'frame_errors': 0, 'picks': 0, 'actions': 0}
@@ -130,7 +133,7 @@ class BrowserSession:
 
     def _atexit_cleanup(self) -> None:
         try:
-            if self._page is not None:
+            if self._page is not None and self._owns_browser:
                 self._page.quit()
         except Exception:
             pass
@@ -154,7 +157,20 @@ class BrowserSession:
             return False
 
     def status(self) -> dict:
-        info = {
+        # 只读缓存，绝不在状态轮询里发 CDP 请求：
+        # get_frames() 等调用在导航/标签页切换时可能长时间阻塞，而状态每 5 秒被轮询一次，
+        # 一旦阻塞就会连带卡住帧泵与 WebSocket 握手（表现为镜像卡顿、一闪一闪）。
+        info = dict(self._last_info or {})
+        metrics = {}
+        if info:
+            metrics = {
+                'u': info.get('url'), 't': info.get('title'),
+                'sx': info.get('sx'), 'sy': info.get('sy'),
+                'iw': info.get('iw'), 'ih': info.get('ih'),
+                'dpr': info.get('dpr'), 'rs': info.get('rdy'),
+                'ok': True,
+            }
+        return {
             'running': self.is_alive(),
             'last_error': self._last_error,
             'debug_port': settings.debug_port,
@@ -164,36 +180,22 @@ class BrowserSession:
             'stats': dict(self.stats),
             'preset': settings.stream_preset,
             'stream_enabled': settings.stream_enabled,
+            'metrics': metrics,
+            'url': info.get('url'),
+            'title': info.get('title'),
         }
-        if not self.is_alive():
-            return info
-        try:
-            info.update(self._op(self._page_info_locked)['data'] or {})
-        except Exception:
-            pass
-        return info
 
-    def _page_info_locked(self) -> dict:
-        page = self.page
-        try:
-            info = page.run_js(
-                'return {u: location.href, t: document.title, sx: window.scrollX, sy: window.scrollY,'
-                ' iw: window.innerWidth, ih: window.innerHeight, dpr: window.devicePixelRatio,'
-                ' rs: document.readyState, sh: document.documentElement.scrollHeight,'
-                ' sw: document.documentElement.scrollWidth, ok: (typeof window.__DPC__ !== "undefined")};')
-            metrics = dict(info or {})
-        except Exception as exc:
-            metrics = {'err': str(exc)}
+    def frames(self) -> dict:
+        return self._op(self._frames_locked)
+
+    def _frames_locked(self) -> dict:
         frames = []
-        try:
-            for fr in page.get_frames():
-                try:
-                    frames.append({'url': fr.url, 'name': getattr(fr, 'name', ''), 'id': fr.frame_id})
-                except Exception:
-                    continue
-        except Exception:
-            pass
-        return {'metrics': metrics, 'frames': frames, 'url': page.url, 'title': page.title}
+        for fr in self.page.get_frames():
+            try:
+                frames.append({'url': fr.url, 'name': getattr(fr, 'name', ''), 'id': fr.frame_id})
+            except Exception:
+                continue
+        return {'frames': frames, 'url': self.page.url}
 
     # ------------------------------------------------------------------ 启停
 
@@ -248,6 +250,7 @@ class BrowserSession:
             pass
 
         self._page = page
+        self._owns_browser = not reused
         self._started_at = time.time()
         self._last_error = None
         self._init_js_id = None
@@ -274,17 +277,23 @@ class BrowserSession:
             return path.resolve().as_uri()
         return 'https://' + target.lstrip('/')
 
-    def stop(self) -> dict:
+    def stop(self, force: bool = False) -> dict:
         with self._lock:
             page = self._page
+            owned = self._owns_browser
             self._page = None
             self._init_js_id = None
+            self._owns_browser = False
+            close = page is not None and (owned or force)
             try:
                 if page is not None:
-                    page.quit()
+                    if close:
+                        page.quit()
+                    else:
+                        log.info('浏览器非本工具启动，仅断开连接，不关闭用户窗口')
             except Exception as exc:
                 log.info('退出浏览器: %s', exc)
-        return {'stopped': True}
+        return {'stopped': True, 'closed': close, 'owned': owned}
 
     def restart(self) -> dict:
         self.stop()
@@ -415,6 +424,7 @@ class BrowserSession:
                     info = {}
                 else:
                     missed = 0
+                    self._last_info = info
                     if info.get('events'):
                         for ev in info['events']:
                             ev['url'] = info.get('url')
@@ -458,22 +468,19 @@ class BrowserSession:
             time.sleep(max(0.0, interval - spent))
 
     def _grab_frame(self, info: dict, t0: float) -> Optional[dict]:
-        sx = float(info.get('sx') or 0.0)
-        sy = float(info.get('sy') or 0.0)
         iw = float(info.get('iw') or 0.0)
         ih = float(info.get('ih') or 0.0)
         if iw < 20 or ih < 20:
             return None
         preset = settings.preset
-        # Chrome 的 clip.scale 会再乘上 devicePixelRatio，这里除回去，
-        # 保证出图尺寸 ≈ 视口 × 预设倍率，带宽与清晰度可预期。
         dpr = max(1.0, float(info.get('dpr') or 1.0))
-        scale = round(preset['scale'] / dpr, 4)
-        clip = {'x': sx, 'y': sy, 'width': iw, 'height': ih, 'scale': scale}
+        # 不要用 clip.scale 缩放：headed Chrome 在离屏抓图期间会把缩放后的
+        # 抓图表面短暂贴到窗口上，肉眼就是整页一闪一闪（停流即消失）。
+        # 这里抓完整视口，由前端按 CSS 尺寸缩放显示。
         try:
             with self._lock:
                 res = self.page.run_cdp('Page.captureScreenshot', format='jpeg',
-                                        quality=preset['quality'], clip=clip,
+                                        quality=preset['quality'],
                                         captureBeyondViewport=False)
         except Exception as exc:
             log.debug('抓帧失败: %s', exc)
@@ -486,8 +493,8 @@ class BrowserSession:
             'data': data,
             # cw/ch 是 CSS 像素视口宽高：前端用它把鼠标位置换算成页面坐标
             'cw': iw, 'ch': ih,
-            'scale': scale, 'dpr': dpr,
-            'sx': sx, 'sy': sy,
+            'scale': 1.0, 'dpr': dpr,
+            'sx': info.get('sx'), 'sy': info.get('sy'),
             'url': info.get('url'), 'title': info.get('title'),
             'rev': info.get('rev'),
             'ts': int(time.time() * 1000),
@@ -980,6 +987,8 @@ class BrowserSession:
             return {'text': ele.raw_text}
         elif action == 'get_html':
             return {'html': ele.html if not opts.get('inner') else ele.inner_html}
+        elif action == 'get_inner_html':
+            return {'html': ele.inner_html}
         elif action == 'get_attr':
             name = opts.get('name') or 'href'
             return {'name': name, 'value': ele.attr(name)}

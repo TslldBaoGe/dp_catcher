@@ -114,6 +114,92 @@ def locate_line(spec, var: str = 'ele', base: str = 'page',
     return line
 
 
+def locate_expr(spec, base: str = 'page', frame_path: Optional[list] = None,
+                shadow_chain: Optional[list] = None) -> str:
+    """返回单个元素的完整定位表达式（不带变量赋值）。"""
+    if spec is None:
+        return ''
+    return render_scope(frame_path, base) + '.ele' + render_locator(spec, shadow_chain)
+
+
+def _shadow_host_prefix(shadow_chain: Optional[list]) -> str:
+    expr = ''
+    for item in shadow_chain or []:
+        sel = item.get('selector') if isinstance(item, dict) else None
+        if not sel and isinstance(item, dict) and item.get('id'):
+            sel = '#' + item['id']
+        if sel:
+            expr += ('.ele' if expr else '') + "('%s').shadow_root" % q(sel)
+    return expr
+
+
+def locate_expr_many(spec, base: str = 'page', frame_path: Optional[list] = None,
+                     shadow_chain: Optional[list] = None) -> str:
+    """返回匹配全部元素的完整表达式（最后一步用 eles）。"""
+    scope = render_scope(frame_path, base)
+    if shadow_chain and not isinstance(spec, (list, tuple)):
+        prefix = _shadow_host_prefix(shadow_chain)
+        if prefix:
+            return scope + prefix + ".eles('%s')" % q(spec)
+    parts = [str(s) for s in spec] if isinstance(spec, (list, tuple)) else [str(spec)]
+    expr = ''
+    for i, part in enumerate(parts):
+        verb = 'eles' if i == len(parts) - 1 else 'ele'
+        if i == 0:
+            expr = ".%s('%s')" % (verb, q(part))
+        elif part.startswith('shadow:'):
+            expr += ".shadow_root.%s('%s')" % (verb, q(part[len('shadow:'):]))
+        else:
+            expr += ".%s('%s')" % (verb, q(part))
+    return scope + expr
+
+
+def usage_snippets(spec, frame_path: Optional[list] = None,
+                   shadow_chain: Optional[list] = None, text: str = '',
+                   attr_name: str = 'href', timeout: int = 10) -> list:
+    """同一个元素在 DrissionPage 里的常用使用方法，供前端一键复制/运行。"""
+    if spec is None:
+        return []
+    loc = 'ele = ' + locate_expr(spec, frame_path=frame_path, shadow_chain=shadow_chain)
+    many = locate_expr_many(spec, frame_path=frame_path, shadow_chain=shadow_chain)
+    text_val = q(text or '要输入的文本')
+    attr_val = q(attr_name or 'href')
+    has_text = bool((text or '').strip())
+    wait_desc = 'DrissionPage 会按默认超时（约 %d 秒）等待元素出现' % int(timeout)
+
+    return [
+        {'id': 'wait', 'label': '等待出现', 'desc': wait_desc,
+         'code': loc + "\nif not ele:\n    raise RuntimeError('元素未出现')",
+         'action': None, 'opts': {}},
+        {'id': 'click', 'label': '点击', 'desc': '真实鼠标点击（不是 JS 点击）',
+         'code': loc + '\nele.click()', 'action': 'click', 'opts': {}},
+        {'id': 'input', 'label': '输入文本',
+         'desc': '先清空，再写入文本' if has_text else '先清空，再写入文本（请在上方填写要输入的内容）',
+         'code': loc + "\nele.clear()\nele.input('%s')" % text_val,
+         'action': 'input' if has_text else None,
+         'opts': {'text': text, 'clear_first': True}},
+        {'id': 'text', 'label': '读取文本', 'desc': '读取元素可见文本',
+         'code': loc + '\nprint(ele.text)', 'action': 'get_text', 'opts': {}},
+        {'id': 'attr', 'label': '读取属性', 'desc': '读取指定 HTML 属性',
+         'code': loc + "\nprint(ele.attr('%s'))" % attr_val,
+         'action': 'get_attr', 'opts': {'name': attr_name or 'href'}},
+        {'id': 'assert', 'label': '存在/可见断言', 'desc': '用于自动化脚本里的检查点',
+         'code': loc + "\nassert ele, '元素不存在'\n"
+                       "assert ele.states.is_displayed, '元素不可见'\n"
+                       "print('断言通过')",
+         'action': None, 'opts': {}},
+        {'id': 'scroll', 'label': '滚动到可见', 'desc': '把元素滚动进视口',
+         'code': loc + '\nele.scroll.to_see()', 'action': 'scroll_to', 'opts': {}},
+        {'id': 'screenshot', 'label': '元素截图', 'desc': '只截取这个元素',
+         'code': loc + "\nele.get_screenshot(path='snapshots', name='element.png')",
+         'action': 'get_screenshot', 'opts': {'name': 'element.png'}},
+        {'id': 'batch', 'label': '批量遍历', 'desc': '同一表达式匹配到的全部元素',
+         'code': "eles = %s\nprint('匹配数量:', len(eles))\nfor ele in eles:\n    print(ele.text)"
+                 % many,
+         'action': None, 'opts': {}},
+    ]
+
+
 def action_line(action: str, var: str = 'ele', opts: Optional[dict] = None,
                 indent: str = '    ') -> str:
     opts = opts or {}

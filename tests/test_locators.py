@@ -149,6 +149,83 @@ class TestScoring(unittest.TestCase):
         self.assertIs(locators._pick_best([bad, multi]), multi)
 
 
+class TestStabilityGrade(unittest.TestCase):
+
+    def _item(self, **kw):
+        base = {'value': '#a', 'count': 1, 'identity': True, 'geometry': True,
+                'rects': [[0, 0, 10, 10]], 'tags': ['input'],
+                'first_rect': [0, 0, 10, 10], 'tag': 'input', 'error': None,
+                'hasTarget': True}
+        base.update(kw)
+        return base
+
+    def test_static_id_is_grade_a(self):
+        got = locators._score({'k': 'id', 'st': 96}, self._item())
+        self.assertEqual(got['grade'], 'A')
+        self.assertGreaterEqual(got['stabilityScore'], 85)
+        self.assertLessEqual(got['stabilityScore'], 100)
+        self.assertIn('唯一命中目标', [f['label'] for f in got['factors']])
+
+    def test_multi_lowers_score_below_unique(self):
+        unique = locators._score({'k': 'id', 'st': 96}, self._item())
+        multi = locators._score({'k': 'id', 'st': 96}, self._item(count=4))
+        self.assertLess(multi['stabilityScore'], unique['stabilityScore'])
+        self.assertNotEqual(multi['grade'], 'A')
+
+    def test_wrong_and_none_are_grade_d(self):
+        wrong = locators._score({'k': 'css', 'st': 60},
+                                self._item(identity=False, geometry=False, count=2))
+        none = locators._score({'k': 'css', 'st': 60},
+                               self._item(count=0, identity=None))
+        self.assertEqual(wrong['grade'], 'D')
+        self.assertLessEqual(wrong['stabilityScore'], 20)
+        self.assertEqual(none['grade'], 'D')
+        self.assertEqual(none['stabilityScore'], 0)
+
+    def test_dynamic_uuid_id_capped_at_b(self):
+        value = '#a1b2c3d4-e5f6-4a7b-8c9d-0e1f2a3b4c5d'
+        got = locators._score({'k': 'id', 'st': 96}, self._item(value=value))
+        self.assertEqual(got['verdict'], 'unique')
+        self.assertEqual(got['grade'], 'B')
+        self.assertIn('属性值像 UUID / 哈希 / 时间戳',
+                      [f['label'] for f in got['factors']])
+
+    def test_css_in_js_class_capped_at_c(self):
+        got = locators._score({'k': 'class', 'st': 66},
+                              self._item(value='.css-1x9f2ab'))
+        self.assertEqual(got['grade'], 'C')
+        self.assertIn('类名像 CSS-in-JS 自动生成',
+                      [f['label'] for f in got['factors']])
+
+    def test_deep_css_path_scores_lower_than_shallow(self):
+        shallow = locators._score({'k': 'css', 'st': 54},
+                                  self._item(value='css:div.a'))
+        deep = locators._score({'k': 'css', 'st': 54},
+                               self._item(value='css:div.a>div.b>div.c>div.d>input.e'))
+        self.assertLess(deep['stabilityScore'], shallow['stabilityScore'])
+        self.assertIn(deep['grade'], ('C', 'D'))
+
+    def test_unknown_identity_is_penalized(self):
+        known = locators._score({'k': 'css', 'st': 54}, self._item())
+        unknown = locators._score({'k': 'css', 'st': 54},
+                                  self._item(identity=None))
+        self.assertLess(unknown['stabilityScore'], known['stabilityScore'])
+        self.assertIn('无法做身份比对', [f['label'] for f in unknown['factors']])
+
+    def test_score_always_in_range_and_grade_known(self):
+        items = [self._item(), self._item(identity=False, count=2),
+                 self._item(count=0, identity=None)]
+        for item in items:
+            for cand in ({'k': 'id', 'st': 100}, {'k': 'xpath', 'st': 0}):
+                with self.subTest(cand=cand, count=item['count']):
+                    got = locators._score(cand, item)
+                    self.assertGreaterEqual(got['stabilityScore'], 0)
+                    self.assertLessEqual(got['stabilityScore'], 100)
+                    self.assertIn(got['grade'], 'ABCD')
+                    self.assertTrue(got['gradeLabel'])
+                    self.assertTrue(got['factors'])
+
+
 class TestBuildPlan(unittest.TestCase):
 
     def _desc(self):
@@ -189,6 +266,9 @@ class TestBuildPlan(unittest.TestCase):
         self.assertEqual(plan['recommended']['value'], '#username')
         self.assertEqual(plan['recommended']['verdict'], 'unique')
         self.assertTrue(plan['recommended']['identity'])
+        self.assertEqual(plan['overall']['grade'], plan['recommended']['grade'])
+        self.assertEqual(plan['overall']['score'],
+                         plan['recommended']['stabilityScore'])
 
     def test_multi_match_candidate_is_flagged(self):
         table = {

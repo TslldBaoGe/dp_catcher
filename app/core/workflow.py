@@ -128,6 +128,38 @@ def _spec_key(value) -> str:
     return str(value)
 
 
+def usage_workflow(spec, frame_path: Optional[list] = None, opts: Optional[dict] = None) -> dict:
+    """生成当前元素/定位表达式的常用使用片段。"""
+    opts = opts or {}
+    with state.lock:
+        desc = state.desc
+        plan = state.plan or {}
+        if frame_path is None:
+            frame_path = list(state.frame_path)
+    if not desc or spec is None:
+        return {'ok': False, 'error': '还没有捕获任何元素', 'error_type': 'NoElement'}
+    frame_path = list(frame_path or [])
+    candidate = None
+    for item in plan.get('candidates') or []:
+        if _spec_key(item.get('value')) == _spec_key(spec):
+            candidate = item
+            break
+    if candidate is None:
+        candidate = plan.get('recommended')
+    return {
+        'ok': True,
+        'spec': spec,
+        'specLabel': _spec_label(spec),
+        'usages': codegen.usage_snippets(
+            spec, frame_path, desc.get('shadow'),
+            text=opts.get('text') or '',
+            attr_name=opts.get('attrName') or 'href'),
+        'candidate': candidate,
+        'overall': plan.get('overall'),
+        'shadow': desc.get('shadow') or [],
+    }
+
+
 def refresh_workflow() -> dict:
     """页面变化后重新校验当前表达式（元素是否还在、位置是否变了）。"""
     with state.lock:
@@ -203,6 +235,7 @@ def history_add(name: Optional[str] = None, actions: Optional[list] = None) -> d
         if not state.desc or state.spec is None:
             return {'ok': False, 'error': '还没有捕获任何元素', 'error_type': 'NoElement'}
         desc = state.desc
+        best = (state.plan or {}).get('recommended') or {}
         entry = {
             'id': state.next_id(),
             'name': name or _label(desc),
@@ -210,12 +243,15 @@ def history_add(name: Optional[str] = None, actions: Optional[list] = None) -> d
             'specLabel': _spec_label(state.spec),
             'framePath': list(desc.get('framePath') or []),
             'shadow': desc.get('shadow') or [],
-            'why': ((state.plan or {}).get('recommended') or {}).get('why', ''),
+            'why': best.get('why', ''),
             'tag': desc.get('tag'),
             'text': (desc.get('text') or '')[:60],
             'url': desc.get('url'),
-            'count': ((state.plan or {}).get('recommended') or {}).get('count'),
-            'verdict': ((state.plan or {}).get('recommended') or {}).get('verdict'),
+            'count': best.get('count'),
+            'verdict': best.get('verdict'),
+            'stabilityScore': best.get('stabilityScore'),
+            'grade': best.get('grade'),
+            'gradeLabel': best.get('gradeLabel'),
             'actions': list(actions if actions is not None else state.actions),
             'ts': int(time.time() * 1000),
         }

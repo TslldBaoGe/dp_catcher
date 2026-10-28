@@ -73,7 +73,22 @@ class BrowserE2ETest(unittest.TestCase):
     @classmethod
     def reset_page(cls):
         cls.page.get(DEMO_URL)
-        time.sleep(0.4)
+        # load_mode=none 不等资源；iframe(srcdoc) 需要额外时间。
+        # 注意：不能用 get_frame() 去探活 —— 它在文档未就绪时会长时间阻塞，
+        # 这里用页面内 JS 检查 contentDocument 是否可用。
+        deadline = time.time() + 20
+        while time.time() < deadline:
+            try:
+                ready = cls.page.run_js(
+                    'var f=document.getElementById("innerFrame");'
+                    'var d=f && f.contentDocument;'
+                    'return !!(d && d.getElementById("frameInput"));', timeout=2)
+                if ready:
+                    break
+            except Exception:
+                pass
+            time.sleep(0.3)
+        time.sleep(0.2)
 
     # ------------------------------------------------------------- 工具
 
@@ -580,10 +595,19 @@ class BrowserE2ETest(unittest.TestCase):
 
     def test_61_highlight_inside_iframe_is_offset_to_top_viewport(self):
         self.reset_page()
-        res = self.session.highlight('#frameInput', ['#innerFrame'])
-        self.assertTrue(res['ok'], '高亮失败: %s %s' % (res.get('error_type'), res.get('error')))
-        group = res['data']['groups'][0]
-        self.assertEqual(group['count'], 1)
+        # load_mode=none 时不等待资源，iframe 内容可能还没就绪 → 重试几轮
+        res = None
+        group = None
+        for _ in range(20):
+            res = self.session.highlight('#frameInput', ['#innerFrame'])
+            if res.get('ok'):
+                group = res['data']['groups'][0]
+                if group.get('count') == 1:
+                    break
+            time.sleep(0.35)
+        self.assertTrue(res.get('ok'), '高亮失败: %s %s' % (res.get('error_type'), res.get('error')))
+        self.assertEqual(group.get('count'), 1,
+                         'iframe 内元素未就绪（%s 秒后仍匹配不到）' % 7)
         # 用「iframe 元素在顶层视口的矩形 + 框架内相对坐标」推算期望值
         frame_rect = self.top_rect('#innerFrame')
         inner = self.inner_rect('#innerFrame', '#frameInput')

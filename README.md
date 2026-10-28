@@ -31,6 +31,7 @@
 | 捕获列表 | 把多个元素 + 测试过的动作串起来，一键导出完整脚本 |
 | 桌面客户端 | Electron + FastAPI，免安装文件夹版 EXE，自动分配端口、自动关停浏览器、日志与截图写入用户目录 |
 | 线程安全 | DrissionPage 的所有调用串行化到同一把锁，帧泵异常自愈，浏览器断开可自动重连 |
+| **Chrome 扩展版** | 在**你自己的浏览器**里直接点选元素，登录态/插件/Cookie 都不用另配；见 [extension/README.md](extension/README.md) |
 
 ---
 
@@ -300,6 +301,7 @@ python tests/run_all.py --only e2e -v   # 只跑浏览器端到端
 | `tests/smoke_dashboard.py` | 控制台前端人工冒烟：捕获 JS 报错、镜像帧、模拟点击捕获、缩放、设置面板，并截图 |
 | `tests/stress_sites.py` | 真站压测：16 个高难度网站（反爬/SPA/Shadow DOM/长页面）测导航耗时、首帧延迟、定位命中率 |
 | `tests/verify_packaged.py` | 打包产物验证：直接驱动 exe 跑完整捕获链路（19 项检查） |
+| `tests/verify_extension.py` | Chrome 扩展验证：真实 Chrome 加载扩展，检查注入/拾取/候选/动作/Shadow DOM（20 项） |
 
 跳过浏览器用例：`set DPC_SKIP_BROWSER_TESTS=1`。
 
